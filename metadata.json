@@ -1,0 +1,6 @@
+{
+  "name": "EchoPlay",
+  "description": "An offline-first, mobile-first MP3 and local audio music player designed for iPhone and PWA installation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
