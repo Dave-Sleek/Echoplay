@@ -508,7 +508,8 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onBack
               Save Changes
             </button>
           </form>
-        </div>
+        </div>,
+        document.body
       )}
 
       <ConfirmDialog

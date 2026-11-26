@@ -88,6 +88,7 @@ interface EchoPlayContextValue {
 
   // Library actions
   toggleFavorite: (songId: string) => Promise<void>;
+  updateSongLyrics: (songId: string, lyrics: string) => Promise<void>;
   removeSong: (songId: string) => Promise<void>;
   importFiles: (files: FileList | File[]) => Promise<void>;
   importProgress: ImportProgress | null;
@@ -839,6 +840,17 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   // Favorites & Songs
+  const updateSongLyrics = useCallback(async (songId: string, lyrics: string) => {
+    setSongs((prev) => {
+      const target = prev.find((s) => s.id === songId);
+      if (!target) return prev;
+      const updated = { ...target, lyrics };
+      void updateSong(updated);
+      return prev.map((s) => (s.id === songId ? updated : s));
+    });
+    showToast('Lyrics updated and saved locally', 'success');
+  }, [showToast]);
+
   const toggleFavorite = useCallback(async (songId: string) => {
     triggerHaptic('favorite');
     setSongs((prev) => {
@@ -1216,6 +1228,7 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     clearQueue,
     dismissMiniPlayer,
     toggleFavorite,
+    updateSongLyrics,
     removeSong,
     importFiles,
     importProgress,
