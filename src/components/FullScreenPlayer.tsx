@@ -177,6 +177,13 @@ export const FullScreenPlayer: React.FC = () => {
     currentSong ? `${currentSong.album}-${currentSong.artist}` : 'echoplay'
   );
 
+  const handleHeaderDragEnd = (_: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
+    if (info.offset.y > 55 || info.velocity.y > 350) {
+      triggerHaptic('tap');
+      setFullPlayerOpen(false);
+    }
+  };
+
   const rates = [0.75, 1, 1.25, 1.5];
 
   return (
@@ -184,10 +191,15 @@ export const FullScreenPlayer: React.FC = () => {
       {isFullPlayerOpen && currentSong && (
         <motion.div
           key="fullscreen-player"
-          initial={{ y: '100%', opacity: 0.6 }}
-          animate={{ y: 0, opacity: 1 }}
-          exit={{ y: '100%', opacity: 0.6 }}
-          transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+          initial={{ y: '100%', opacity: 0.9, scale: 0.985 }}
+          animate={{ y: 0, opacity: 1, scale: 1 }}
+          exit={{ y: '100%', opacity: 0.9, scale: 0.985 }}
+          transition={{
+            type: 'spring' as const,
+            stiffness: 350,
+            damping: 33,
+            mass: 0.85,
+          }}
           className="fixed inset-0 z-50 flex flex-col bg-[#0C0D12] text-white overflow-hidden"
           role="dialog"
           aria-modal="true"
@@ -201,44 +213,70 @@ export const FullScreenPlayer: React.FC = () => {
             }}
           />
 
-          {/* Top Bar */}
-          <header className="relative z-10 flex items-center justify-between px-4 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-2">
-            <button
-              type="button"
+          {/* Top Bar with iOS Sheet Grab Handle & Drag-to-Dismiss */}
+          <motion.div
+            drag="y"
+            dragConstraints={{ top: 0, bottom: 0 }}
+            dragElastic={0.3}
+            onDragEnd={handleHeaderDragEnd}
+            style={{ touchAction: 'pan-x' }}
+            className="relative z-10 flex flex-col px-4 pt-[calc(8px+env(safe-area-inset-top,0px))] pb-1"
+          >
+            {/* Grab Handle */}
+            <div
               onClick={() => {
                 triggerHaptic('tap');
                 setFullPlayerOpen(false);
               }}
-              aria-label="Minimize player"
-              className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full bg-white/8 hover:bg-white/15 transition-colors"
+              className="w-full flex justify-center py-1 cursor-pointer select-none"
+              aria-label="Dismiss full player"
             >
-              <ChevronDown className="w-6 h-6" />
-            </button>
-
-            <div className="text-center min-w-0 px-3">
-              <p className="text-[11px] font-semibold tracking-wider uppercase text-white/60">
-                Now Playing
-              </p>
-              <p className="text-xs text-white/80 truncate max-w-[200px] sm:max-w-xs">
-                {currentSong.album}
-              </p>
+              <div className="w-10 h-1.5 rounded-full bg-white/25 hover:bg-white/40 active:bg-white/50 transition-colors" />
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                triggerHaptic('tap');
-                setShowMoreMenu(true);
-              }}
-              aria-label="More playback options"
-              className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full bg-white/8 hover:bg-white/15 transition-colors"
-            >
-              <MoreHorizontal className="w-5 h-5" />
-            </button>
-          </header>
+            <header className="flex items-center justify-between pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic('tap');
+                  setFullPlayerOpen(false);
+                }}
+                aria-label="Minimize player"
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full bg-white/8 hover:bg-white/15 transition-colors"
+              >
+                <ChevronDown className="w-6 h-6" />
+              </button>
 
-          {/* Main Content */}
-          <div className="relative z-10 flex-1 flex flex-col justify-between max-w-xl w-full mx-auto px-6 pb-[calc(24px+env(safe-area-inset-bottom,0px))] pt-2 overflow-y-auto">
+              <div className="text-center min-w-0 px-3">
+                <p className="text-[11px] font-semibold tracking-wider uppercase text-white/60">
+                  Now Playing
+                </p>
+                <p className="text-xs text-white/80 truncate max-w-[200px] sm:max-w-xs">
+                  {currentSong.album}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic('tap');
+                  setShowMoreMenu(true);
+                }}
+                aria-label="More playback options"
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full bg-white/8 hover:bg-white/15 transition-colors"
+              >
+                <MoreHorizontal className="w-5 h-5" />
+              </button>
+            </header>
+          </motion.div>
+
+          {/* Main Content with subtle entrance cascade */}
+          <motion.div
+            initial={{ y: 22, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            transition={{ delay: 0.06, duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
+            className="relative z-10 flex-1 flex flex-col justify-between max-w-xl w-full mx-auto px-6 pb-[calc(24px+env(safe-area-inset-bottom,0px))] pt-1 overflow-y-auto"
+          >
             {/* Artwork / Lyrics Toggle View with Gesture Carousel */}
             <div className="flex-1 flex flex-col items-center justify-center py-2 sm:py-3 min-h-[320px]">
               {showLyrics ? (
@@ -566,7 +604,7 @@ export const FullScreenPlayer: React.FC = () => {
                 </button>
               </div>
             </div>
-          </div>
+          </motion.div>
 
           {/* More Options Sheet inside Full Player */}
           {showMoreMenu && (
