@@ -7,6 +7,7 @@ import {
   ListMusic,
   Play,
   Plus,
+  RotateCcw,
   Shuffle,
   Sparkles,
 } from 'lucide-react';
@@ -318,7 +319,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenPlaylist }) => {
                 id="recently-added-heading"
                 className="text-lg font-bold tracking-tight text-zinc-900 dark:text-white flex items-center gap-2"
               >
-                <Sparkles className="w-4 h-4 text-[var(--accent)]" />
+                <RotateCcw className="w-4 h-4 text-[var(--accent)]" />
                 Recently Added
               </h2>
               <button
