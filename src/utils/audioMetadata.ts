@@ -25,6 +25,10 @@ const SUPPORTED_EXTENSIONS: Record<string, AudioFormat> = {
   ogg: 'OGG',
   oga: 'OGG',
   opus: 'OGG',
+  webm: 'OGG',
+  weba: 'OGG',
+  aif: 'WAV',
+  aiff: 'WAV',
 };
 
 export function detectAudioFormat(file: File): AudioFormat | null {
@@ -38,7 +42,7 @@ export function detectAudioFormat(file: File): AudioFormat | null {
   if (mime.includes('aac')) return 'AAC';
   if (mime.includes('wav')) return 'WAV';
   if (mime.includes('flac')) return 'FLAC';
-  if (mime.includes('ogg') || mime.includes('opus')) return 'OGG';
+  if (mime.includes('ogg') || mime.includes('opus') || mime.includes('webm')) return 'OGG';
   if (mime.startsWith('audio/')) return 'AUDIO';
   return null;
 }

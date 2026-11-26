@@ -410,7 +410,7 @@ export const SettingsView: React.FC = () => {
           <h2 className="text-base font-bold text-zinc-900 dark:text-white">About EchoPlay</h2>
         </div>
         <p className="text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
-          EchoPlay is an offline-first, privacy-focused local audio player crafted for iPhone Safari and Home Screen PWAs. Supports MP3, M4A, AAC, WAV, FLAC, and OGG playback with local ID3/MP4/FLAC artwork extraction.
+          EchoPlay is an offline-first, privacy-focused local audio player crafted for Android and iPhone devices. Supports scanning phone audio and folders, with MP3, M4A, AAC, WAV, FLAC, and OGG playback and local artwork extraction.
         </p>
         <p className="text-xs text-zinc-500 dark:text-zinc-500 tabular-nums pt-1">
           Version 1.0.0

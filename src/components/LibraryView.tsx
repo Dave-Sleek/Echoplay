@@ -180,8 +180,8 @@ export const LibraryView: React.FC = () => {
         <EmptyState
           icon={Music}
           title="No music in your library"
-          description="Import MP3, M4A, AAC, WAV, FLAC, or OGG audio files from your iPhone or device to browse by songs, albums, and artists."
-          actionLabel="Import Music"
+          description="Scan your Android phone, select a Music folder, or import audio files to browse by songs, albums, and artists."
+          actionLabel="Scan & Import Music"
           onAction={() => setImportModalOpen(true)}
         />
       </div>

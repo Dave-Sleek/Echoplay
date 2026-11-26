@@ -173,8 +173,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenPlaylist }) => {
           <EmptyState
             icon={Disc3}
             title="Your offline library is ready"
-            description="Import MP3, M4A, AAC, WAV, FLAC, or OGG files directly from On My iPhone, iCloud Drive, or this device. Everything stays locally on your device."
-            actionLabel="Import Music"
+            description="Scan your Android phone, select a Music folder, or import audio files from your device. Everything stays saved locally in your offline library."
+            actionLabel="Scan & Import Music"
             onAction={() => {
               triggerHaptic('tap');
               setImportModalOpen(true);

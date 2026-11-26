@@ -882,8 +882,21 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // Import Audio Files
   const importFiles = useCallback(
     async (fileList: FileList | File[]) => {
-      const files = Array.from(fileList);
-      if (files.length === 0) return;
+      const allFiles = Array.from(fileList);
+      if (allFiles.length === 0) return;
+
+      // Filter out non-audio files (like album art .jpg, lyrics .lrc, .nomedia, .cache)
+      // When multiple files or a directory is scanned, pre-filter to audio formats.
+      const files =
+        allFiles.length > 2
+          ? allFiles.filter((f) => !f.name.startsWith('.') && detectAudioFormat(f) !== null)
+          : allFiles;
+
+      if (files.length === 0) {
+        showToast('No supported audio files (MP3, M4A, FLAC, WAV, AAC, OGG) found.', 'error');
+        setImportProgress(null);
+        return;
+      }
 
       const existingFingerprints = new Set(songs.map((s) => s.fingerprint));
       const progress: ImportProgress = {
