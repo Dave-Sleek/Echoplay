@@ -17,15 +17,13 @@ const PATTERNS: Record<HapticPattern, number | number[]> = {
   dismiss: [14, 18],
 };
 
+const SWITCH_ID = 'echoplay-taptic-switch';
+
 let hapticsEnabled = true;
 let iosSwitchLabel: HTMLLabelElement | null = null;
 let iosSwitchInput: HTMLInputElement | null = null;
 
-export function setHapticsEnabled(enabled: boolean): void {
-  hapticsEnabled = enabled;
-}
-
-function isAppleTouchDevice(): boolean {
+export function isAppleTouchDevice(): boolean {
   if (typeof navigator === 'undefined') return false;
   return (
     /iP(hone|ad|od)/.test(navigator.userAgent) ||
@@ -33,39 +31,84 @@ function isAppleTouchDevice(): boolean {
   );
 }
 
-function triggerIOSSafariTaptic(): void {
-  if (typeof document === 'undefined' || !document.body) return;
+function ensureIOSSwitchElement(): boolean {
+  if (typeof document === 'undefined') return false;
+  if (!isAppleTouchDevice()) return false;
+
+  if (!document.body) {
+    return false;
+  }
+
+  if (iosSwitchLabel && iosSwitchInput && document.body.contains(iosSwitchLabel)) {
+    return true;
+  }
+
+  const existingInput = document.getElementById(SWITCH_ID) as HTMLInputElement | null;
+  if (existingInput && existingInput.parentElement instanceof HTMLLabelElement) {
+    iosSwitchInput = existingInput;
+    iosSwitchLabel = existingInput.parentElement;
+    return true;
+  }
+
   try {
-    if (!iosSwitchLabel || !iosSwitchInput || !document.body.contains(iosSwitchLabel)) {
-      const label = document.createElement('label');
-      label.setAttribute('aria-hidden', 'true');
-      label.style.position = 'fixed';
-      label.style.top = '0';
-      label.style.left = '0';
-      label.style.width = '1px';
-      label.style.height = '1px';
-      label.style.opacity = '0';
-      label.style.pointerEvents = 'none';
-      label.style.overflow = 'hidden';
-      label.style.margin = '0';
-      label.style.padding = '0';
+    const label = document.createElement('label');
+    label.htmlFor = SWITCH_ID;
+    label.setAttribute('aria-hidden', 'true');
+    // Must stay mounted in the viewport with non-zero opacity & size and without
+    // pointer-events: none so iOS WebKit lays out the native switch and fires Taptic feedback.
+    label.style.cssText =
+      'position:fixed;top:0;left:0;width:2px;height:2px;opacity:0.001;overflow:hidden;z-index:-1;margin:0;padding:0;user-select:none;-webkit-user-select:none;';
 
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.tabIndex = -1;
-      input.setAttribute('switch', '');
-      input.setAttribute('aria-hidden', 'true');
-      input.style.fontSize = '16px';
+    const input = document.createElement('input');
+    input.id = SWITCH_ID;
+    input.type = 'checkbox';
+    input.tabIndex = -1;
+    input.setAttribute('switch', '');
+    input.setAttribute('aria-hidden', 'true');
+    input.style.cssText = 'font-size:16px;margin:0;';
 
-      label.appendChild(input);
-      document.body.appendChild(label);
-      iosSwitchLabel = label;
-      iosSwitchInput = input;
-    }
-
-    iosSwitchLabel.click();
+    label.appendChild(input);
+    document.body.appendChild(label);
+    iosSwitchLabel = label;
+    iosSwitchInput = input;
+    return true;
   } catch {
-    // Ignore on unsupported browsers
+    return false;
+  }
+}
+
+// Pre-mount the native iOS switch element early so WebKit has it in the layout tree
+// BEFORE the user's first tap (dynamically inserting on the same tick often skips haptics).
+if (typeof document !== 'undefined' && isAppleTouchDevice()) {
+  if (document.body) {
+    ensureIOSSwitchElement();
+  } else {
+    document.addEventListener(
+      'DOMContentLoaded',
+      () => {
+        ensureIOSSwitchElement();
+      },
+      { once: true }
+    );
+  }
+}
+
+export function setHapticsEnabled(enabled: boolean): void {
+  hapticsEnabled = enabled;
+  if (enabled) {
+    ensureIOSSwitchElement();
+  }
+}
+
+function triggerIOSSafariTaptic(): void {
+  if (!ensureIOSSwitchElement() || !iosSwitchLabel || !iosSwitchInput) return;
+  try {
+    iosSwitchLabel.click();
+    if (document.activeElement === iosSwitchInput) {
+      iosSwitchInput.blur();
+    }
+  } catch {
+    // Ignore on unsupported iOS WebKit versions
   }
 }
 
@@ -79,20 +122,12 @@ export function triggerHaptic(pattern: HapticPattern = 'tap'): void {
   if (typeof navigator === 'undefined') return;
 
   try {
-    if (
-      typeof window !== 'undefined' &&
-      window.matchMedia &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    ) {
-      return;
-    }
-
     if (typeof navigator.vibrate === 'function') {
       navigator.vibrate(PATTERNS[pattern]);
       return;
     }
 
-    // Fallback for iOS 17.4+/18+ Safari Taptic Engine via native switch control
+    // iOS Safari & Home Screen PWAs block navigator.vibrate; use native Taptic switch (iOS 17.4+/18+)
     if (isAppleTouchDevice()) {
       triggerIOSSafariTaptic();
     }

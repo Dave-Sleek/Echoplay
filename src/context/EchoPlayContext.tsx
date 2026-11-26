@@ -609,6 +609,7 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const playSong = useCallback(
     async (song: Song, contextQueue?: Song[]) => {
+      triggerHaptic('tap');
       playerService.primeAudioOnGesture(true);
       const sourceList = contextQueue && contextQueue.length > 0 ? contextQueue : songs;
       const origIds = sourceList.map((s) => s.id);
@@ -639,6 +640,7 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const playList = useCallback(
     async (list: Song[], startIndex = 0, forceShuffle?: boolean) => {
       if (list.length === 0) return;
+      triggerHaptic('playPause');
       playerService.primeAudioOnGesture(true);
       const origIds = list.map((s) => s.id);
       const shouldShuffle = forceShuffle !== undefined ? forceShuffle : shuffle;

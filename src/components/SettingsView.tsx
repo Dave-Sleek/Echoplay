@@ -272,7 +272,7 @@ export const SettingsView: React.FC = () => {
               Haptic Feedback
             </p>
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Subtle tactile pulses on playback controls and long-press actions (where supported)
+              Subtle tactile pulses on playback controls and gestures (on iPhone, requires iOS 17.4+ with System Haptics enabled)
             </p>
           </div>
           <button

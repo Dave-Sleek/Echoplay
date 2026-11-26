@@ -412,6 +412,7 @@ export const FullScreenPlayer: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
+                    triggerHaptic('tap');
                     setPlaylistTargetForSong(currentSong);
                     setShowMoreMenu(false);
                   }}
@@ -423,6 +424,7 @@ export const FullScreenPlayer: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
+                    triggerHaptic('tap');
                     setInfoTargetSong(currentSong);
                     setShowMoreMenu(false);
                   }}
@@ -434,6 +436,7 @@ export const FullScreenPlayer: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
+                    triggerHaptic('tap');
                     setShowLyrics((v) => !v);
                     setShowMoreMenu(false);
                   }}
@@ -444,7 +447,10 @@ export const FullScreenPlayer: React.FC = () => {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowMoreMenu(false)}
+                  onClick={() => {
+                    triggerHaptic('tap');
+                    setShowMoreMenu(false);
+                  }}
                   className="mt-2 w-full min-h-[44px] rounded-xl bg-white/10 text-sm font-semibold hover:bg-white/15 transition-colors"
                 >
                   Close
