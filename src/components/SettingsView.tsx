@@ -380,14 +380,20 @@ export const SettingsView: React.FC = () => {
         <div className="pt-3 border-t border-black/[0.06] dark:border-white/[0.06] flex flex-col sm:flex-row gap-2.5">
           <button
             type="button"
-            onClick={() => setConfirmAction('recent')}
+            onClick={() => {
+              triggerHaptic('tap');
+              setConfirmAction('recent');
+            }}
             className="min-h-[44px] px-4 rounded-xl bg-black/[0.05] dark:bg-white/[0.07] hover:bg-black/[0.09] dark:hover:bg-white/[0.12] text-xs font-semibold text-zinc-800 dark:text-zinc-200 transition-colors"
           >
             Clear Recently Played
           </button>
           <button
             type="button"
-            onClick={() => setConfirmAction('library')}
+            onClick={() => {
+              triggerHaptic('tap');
+              setConfirmAction('library');
+            }}
             className="min-h-[44px] px-4 rounded-xl bg-red-500/10 hover:bg-red-500/18 text-xs font-semibold text-red-600 dark:text-red-400 inline-flex items-center justify-center gap-1.5 transition-colors"
           >
             <Trash2 className="w-3.5 h-3.5" />
@@ -395,7 +401,10 @@ export const SettingsView: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={() => setConfirmAction('reset')}
+            onClick={() => {
+              triggerHaptic('tap');
+              setConfirmAction('reset');
+            }}
             className="min-h-[44px] px-4 rounded-xl border border-red-500/25 hover:bg-red-500/10 text-xs font-semibold text-red-600 dark:text-red-400 transition-colors"
           >
             Reset All App Data

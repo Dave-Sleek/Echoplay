@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ArrowDown,
   ArrowLeft,
@@ -295,13 +296,15 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onBack
       )}
 
       {/* Add Songs Picker Modal */}
-      {showAddSongs && (
-        <div
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm"
-          onClick={() => setShowAddSongs(false)}
-          role="dialog"
-          aria-modal="true"
-        >
+      {typeof document !== 'undefined' &&
+        showAddSongs &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/65 backdrop-blur-sm"
+            onClick={() => setShowAddSongs(false)}
+            role="dialog"
+            aria-modal="true"
+          >
           <div
             className="w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl bg-white dark:bg-[#171920] border-t sm:border border-black/10 dark:border-white/10 p-5 pb-[calc(20px+env(safe-area-inset-bottom,0px))] shadow-2xl h-[80dvh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
@@ -397,17 +400,20 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onBack
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Edit Playlist Modal */}
-      {showEditModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm"
-          onClick={() => setShowEditModal(false)}
-          role="dialog"
-          aria-modal="true"
-        >
+      {typeof document !== 'undefined' &&
+        showEditModal &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/65 backdrop-blur-sm"
+            onClick={() => setShowEditModal(false)}
+            role="dialog"
+            aria-modal="true"
+          >
           <form
             onSubmit={handleSaveEdit}
             onClick={(e) => e.stopPropagation()}
