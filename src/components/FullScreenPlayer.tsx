@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   ChevronDown,
   FileText,
@@ -18,7 +18,14 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
-import { AnimatePresence, motion } from 'motion/react';
+import {
+  AnimatePresence,
+  motion,
+  useMotionValue,
+  useTransform,
+  type PanInfo,
+  type Variants,
+} from 'motion/react';
 import { useEchoPlay } from '../context/EchoPlayContext';
 import { useLongPress } from '../hooks/useLongPress';
 import { getPaletteForKey } from '../utils/artwork';
@@ -56,10 +63,108 @@ export const FullScreenPlayer: React.FC = () => {
   const [scrubValue, setScrubValue] = useState(0);
   const [showLyrics, setShowLyrics] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [slideDirection, setSlideDirection] = useState<number>(1);
+
+  const didDragRef = useRef(false);
+  const thresholdCrossedRef = useRef(false);
+  const dragX = useMotionValue(0);
+
+  // Dynamic visual HUD cues during drag
+  const nextIndicatorOpacity = useTransform(dragX, [-90, -35, -5], [1, 0.75, 0]);
+  const nextIndicatorScale = useTransform(dragX, [-90, -35, -5], [1, 0.9, 0.7]);
+  const prevIndicatorOpacity = useTransform(dragX, [5, 35, 90], [0, 0.75, 1]);
+  const prevIndicatorScale = useTransform(dragX, [5, 35, 90], [0.7, 0.9, 1]);
+
+  const handleDragStart = () => {
+    didDragRef.current = true;
+    thresholdCrossedRef.current = false;
+  };
+
+  const handleDrag = (_: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
+    dragX.set(info.offset.x);
+    const crossed = Math.abs(info.offset.x) > 55 || Math.abs(info.velocity.x) > 350;
+    if (crossed && !thresholdCrossedRef.current) {
+      thresholdCrossedRef.current = true;
+      triggerHaptic('selection');
+    } else if (!crossed && thresholdCrossedRef.current) {
+      thresholdCrossedRef.current = false;
+    }
+  };
+
+  const handleDragEnd = (_: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
+    dragX.set(0);
+    window.setTimeout(() => {
+      didDragRef.current = false;
+    }, 150);
+
+    // Swipe left -> Next track
+    if (info.offset.x < -55 || info.velocity.x < -350) {
+      setSlideDirection(1);
+      triggerHaptic('skip');
+      void nextTrack();
+      return;
+    }
+
+    // Swipe right -> Previous track
+    if (info.offset.x > 55 || info.velocity.x > 350) {
+      setSlideDirection(-1);
+      triggerHaptic('skip');
+      void prevTrack();
+      return;
+    }
+  };
 
   const artworkLongPress = useLongPress({
-    onLongPress: () => setShowMoreMenu(true),
+    onLongPress: () => {
+      if (didDragRef.current) return;
+      setShowMoreMenu(true);
+    },
   });
+
+  const artworkVariants: Variants = {
+    enter: (dir: number) => ({
+      x: dir > 0 ? 160 : dir < 0 ? -160 : 0,
+      opacity: 0,
+      scale: 0.9,
+    }),
+    center: {
+      x: 0,
+      opacity: 1,
+      scale: 1,
+      transition: {
+        x: { type: 'spring' as const, stiffness: 360, damping: 28, mass: 0.8 },
+        opacity: { duration: 0.22 },
+        scale: { duration: 0.22 },
+      },
+    },
+    exit: (dir: number) => ({
+      x: dir > 0 ? -160 : dir < 0 ? 160 : 0,
+      opacity: 0,
+      scale: 0.9,
+      transition: {
+        x: { type: 'spring' as const, stiffness: 360, damping: 28, mass: 0.8 },
+        opacity: { duration: 0.2 },
+        scale: { duration: 0.2 },
+      },
+    }),
+  };
+
+  const titleVariants: Variants = {
+    enter: (dir: number) => ({
+      x: dir > 0 ? 30 : dir < 0 ? -30 : 0,
+      opacity: 0,
+    }),
+    center: {
+      x: 0,
+      opacity: 1,
+      transition: { duration: 0.2 },
+    },
+    exit: (dir: number) => ({
+      x: dir > 0 ? -30 : dir < 0 ? 30 : 0,
+      opacity: 0,
+      transition: { duration: 0.2 },
+    }),
+  };
 
   const displayedTime = isScrubbing ? scrubValue : currentTime;
   const effectiveDuration = duration > 0 ? duration : currentSong?.duration || 0;
@@ -134,8 +239,8 @@ export const FullScreenPlayer: React.FC = () => {
 
           {/* Main Content */}
           <div className="relative z-10 flex-1 flex flex-col justify-between max-w-xl w-full mx-auto px-6 pb-[calc(24px+env(safe-area-inset-bottom,0px))] pt-2 overflow-y-auto">
-            {/* Artwork / Lyrics Toggle View */}
-            <div className="flex-1 flex items-center justify-center py-3">
+            {/* Artwork / Lyrics Toggle View with Gesture Carousel */}
+            <div className="flex-1 flex flex-col items-center justify-center py-2 sm:py-3 min-h-[320px]">
               {showLyrics ? (
                 <div className="w-full h-full max-h-[360px] rounded-3xl bg-black/35 border border-white/10 backdrop-blur-md p-6 flex flex-col">
                   <div className="flex items-center justify-between pb-3 border-b border-white/10">
@@ -164,35 +269,94 @@ export const FullScreenPlayer: React.FC = () => {
                   </div>
                 </div>
               ) : (
-                <div
-                  {...artworkLongPress}
-                  className={`w-full max-w-[310px] sm:max-w-[360px] aspect-square transition-transform duration-300 ease-out select-none ${
-                    isPlaying ? 'scale-100' : 'scale-[0.93]'
-                  }`}
-                >
-                  <AlbumArtwork
-                    artworkId={currentSong.artworkId}
-                    fallbackKey={`${currentSong.album}-${currentSong.artist}`}
-                    alt={`${currentSong.title} cover art`}
-                    sizeClass="w-full h-full"
-                    radiusClass="rounded-3xl"
-                    className="shadow-[0_24px_60px_rgba(0,0,0,0.55)] ring-1 ring-white/10"
-                  />
+                <div className="relative w-full max-w-[310px] sm:max-w-[360px] aspect-square flex items-center justify-center">
+                  {/* Next Track HUD Pill (revealed when swiping left) */}
+                  <motion.div
+                    style={{ opacity: nextIndicatorOpacity, scale: nextIndicatorScale }}
+                    className="pointer-events-none absolute right-2 z-30 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/75 backdrop-blur-md border border-white/20 text-white text-xs font-semibold shadow-2xl"
+                  >
+                    <span>Next</span>
+                    <SkipForward className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  </motion.div>
+
+                  {/* Previous Track HUD Pill (revealed when swiping right) */}
+                  <motion.div
+                    style={{ opacity: prevIndicatorOpacity, scale: prevIndicatorScale }}
+                    className="pointer-events-none absolute left-2 z-30 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/75 backdrop-blur-md border border-white/20 text-white text-xs font-semibold shadow-2xl"
+                  >
+                    <SkipBack className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    <span>Previous</span>
+                  </motion.div>
+
+                  {/* Animated & Draggable Artwork Carousel Item */}
+                  <AnimatePresence mode="popLayout" custom={slideDirection} initial={false}>
+                    <motion.div
+                      key={currentSong.id}
+                      custom={slideDirection}
+                      variants={artworkVariants}
+                      initial="enter"
+                      animate="center"
+                      exit="exit"
+                      drag="x"
+                      dragDirectionLock
+                      dragConstraints={{ left: 0, right: 0 }}
+                      dragElastic={0.45}
+                      dragSnapToOrigin
+                      onDragStart={handleDragStart}
+                      onDrag={handleDrag}
+                      onDragEnd={handleDragEnd}
+                      {...artworkLongPress}
+                      style={{ touchAction: 'pan-y' }}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Swipe left for next track, swipe right for previous track. Currently playing: ${currentSong.title}`}
+                      className={`w-full h-full select-none cursor-grab active:cursor-grabbing will-change-transform transition-transform duration-300 ease-out focus:outline-none ${
+                        isPlaying ? 'scale-100' : 'scale-[0.93]'
+                      }`}
+                    >
+                      <AlbumArtwork
+                        artworkId={currentSong.artworkId}
+                        fallbackKey={`${currentSong.album}-${currentSong.artist}`}
+                        alt={`${currentSong.title} cover art`}
+                        sizeClass="w-full h-full"
+                        radiusClass="rounded-3xl"
+                        className="shadow-[0_24px_60px_rgba(0,0,0,0.55)] ring-1 ring-white/10 pointer-events-none"
+                      />
+                    </motion.div>
+                  </AnimatePresence>
+                </div>
+              )}
+
+              {/* Subtle gesture hint */}
+              {!showLyrics && (
+                <div className="flex items-center justify-center gap-1.5 pt-2 text-[11px] text-white/40 font-medium select-none">
+                  <span>Swipe artwork to skip track</span>
                 </div>
               )}
             </div>
 
             {/* Track Meta & Controls */}
-            <div className="space-y-5 pt-2">
-              {/* Title, Artist, Favorite */}
+            <div className="space-y-4 pt-1">
+              {/* Title, Artist, Favorite with smooth slide transition */}
               <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white truncate">
-                    {currentSong.title}
-                  </h2>
-                  <p className="text-sm sm:text-base text-white/70 truncate mt-0.5">
-                    {currentSong.artist}
-                  </p>
+                <div className="min-w-0 flex-1 overflow-hidden">
+                  <AnimatePresence mode="popLayout" custom={slideDirection} initial={false}>
+                    <motion.div
+                      key={currentSong.id}
+                      custom={slideDirection}
+                      variants={titleVariants}
+                      initial="enter"
+                      animate="center"
+                      exit="exit"
+                    >
+                      <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white truncate">
+                        {currentSong.title}
+                      </h2>
+                      <p className="text-sm sm:text-base text-white/70 truncate mt-0.5">
+                        {currentSong.artist}
+                      </p>
+                    </motion.div>
+                  </AnimatePresence>
                 </div>
                 <button
                   type="button"
@@ -271,7 +435,10 @@ export const FullScreenPlayer: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={() => void prevTrack()}
+                  onClick={() => {
+                    setSlideDirection(-1);
+                    void prevTrack();
+                  }}
                   aria-label="Previous track"
                   className="min-w-[52px] min-h-[52px] flex items-center justify-center rounded-full text-white hover:bg-white/10 active:scale-95 transition-all"
                 >
@@ -293,7 +460,10 @@ export const FullScreenPlayer: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={() => void nextTrack()}
+                  onClick={() => {
+                    setSlideDirection(1);
+                    void nextTrack();
+                  }}
                   aria-label="Next track"
                   className="min-w-[52px] min-h-[52px] flex items-center justify-center rounded-full text-white hover:bg-white/10 active:scale-95 transition-all"
                 >
