@@ -110,6 +110,7 @@ class AudioPlayerService {
   private limiterNode: DynamicsCompressorNode | null = null;
   private normalizationEnabled = false;
   private currentGainDb = 0;
+  private eqFilters: BiquadFilterNode[] = [];
 
   // Web Audio buffer fallback state
   private wbBuffer: AudioBuffer | null = null;
@@ -430,6 +431,23 @@ class AudioPlayerService {
         limiter.attack.value = 0.003;
         limiter.release.value = 0.12;
 
+        const frequencies = [60, 230, 910, 4000, 14000];
+        const eqFilters = frequencies.map((freq) => {
+          const f = ctx.createBiquadFilter();
+          f.type = 'peaking';
+          f.frequency.value = freq;
+          f.Q.value = 1.4;
+          f.gain.value = 0;
+          return f;
+        });
+
+        // Connect EQ filters in series: eq[0] -> eq[1] -> eq[2] -> eq[3] -> eq[4] -> gain
+        let prev: AudioNode = eqFilters[0];
+        for (let i = 0; i < eqFilters.length - 1; i++) {
+          eqFilters[i].connect(eqFilters[i + 1]);
+        }
+        eqFilters[eqFilters.length - 1].connect(gain);
+
         gain.connect(masterVol);
         masterVol.connect(limiter);
         limiter.connect(ctx.destination);
@@ -449,11 +467,12 @@ class AudioPlayerService {
         this.gainNode = gain;
         this.masterVolumeNode = masterVol;
         this.limiterNode = limiter;
+        this.eqFilters = eqFilters;
       }
 
-      if (attachMediaElement && !this.mediaSource && this.gainNode) {
+      if (attachMediaElement && !this.mediaSource && this.audioCtx && this.eqFilters.length > 0) {
         const source = this.audioCtx.createMediaElementSource(this.audio);
-        source.connect(this.gainNode);
+        source.connect(this.eqFilters[0]);
         this.mediaSource = source;
       }
 
@@ -469,6 +488,22 @@ class AudioPlayerService {
     } catch {
       return false;
     }
+  }
+
+  setEqBands(bands: [number, number, number, number, number]): void {
+    if (!this.audioCtx) {
+      this.ensureAudioContextGraph(this.mode === 'html');
+    }
+    const now = this.audioCtx ? this.audioCtx.currentTime : 0;
+    bands.forEach((gainVal, i) => {
+      if (this.eqFilters[i]) {
+        try {
+          this.eqFilters[i].gain.setTargetAtTime(gainVal, now, 0.05);
+        } catch {
+          this.eqFilters[i].gain.value = gainVal;
+        }
+      }
+    });
   }
 
   setNormalizationEnabled(enabled: boolean, currentSongGainDb?: number): void {

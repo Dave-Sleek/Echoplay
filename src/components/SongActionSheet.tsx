@@ -5,6 +5,7 @@ import {
   ListEnd,
   ListPlus,
   ListStart,
+  Radio,
   Trash2,
 } from 'lucide-react';
 import { useEchoPlay } from '../context/EchoPlayContext';
@@ -20,6 +21,7 @@ export const SongActionSheet: React.FC = () => {
     songs,
     playNext,
     addToQueue,
+    startSongRadio,
     setPlaylistTargetForSong,
     setInfoTargetSong,
     toggleFavorite,
@@ -90,6 +92,19 @@ export const SongActionSheet: React.FC = () => {
               >
                 <ListEnd className="w-4 h-4 text-zinc-500" />
                 Add to Queue
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic('tap');
+                  void startSongRadio(liveSong);
+                  setActionSheetTarget(null);
+                }}
+                className="min-h-[48px] px-3 flex items-center gap-3 rounded-xl text-sm font-medium text-zinc-800 dark:text-zinc-100 hover:bg-black/5 dark:hover:bg-white/6 transition-colors text-left"
+              >
+                <Radio className="w-4 h-4 text-[var(--accent)]" />
+                Start Song Radio
               </button>
 
               <button

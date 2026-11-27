@@ -58,6 +58,10 @@ export interface UserSettings {
   volume: number;
   hapticsEnabled: boolean;
   audioNormalization: boolean;
+  eqBands: [number, number, number, number, number]; // 60Hz, 230Hz, 910Hz, 4kHz, 14kHz (-12dB to +12dB)
+  crossfadeEnabled: boolean;
+  crossfadeDuration: number; // seconds (1 to 12)
+  sleepTimerUntil?: number; // timestamp
 }
 
 export interface PlaybackSnapshot {

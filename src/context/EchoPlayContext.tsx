@@ -65,10 +65,13 @@ interface EchoPlayContextValue {
   shuffle: boolean;
   repeatMode: RepeatMode;
   isVolumeReadOnly: boolean;
+  sleepTimer: number | 'track' | null;
+  setSleepTimer: (timer: number | 'track' | null) => void;
 
   // Player actions
   playSong: (song: Song, contextQueue?: Song[]) => Promise<void>;
   playList: (list: Song[], startIndex?: number, forceShuffle?: boolean) => Promise<void>;
+  startSongRadio: (song: Song) => Promise<void>;
   togglePlayPause: () => Promise<void>;
   nextTrack: () => Promise<void>;
   prevTrack: () => Promise<void>;
@@ -164,7 +167,17 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [duration, setDuration] = useState(0);
   const [shuffle, setShuffle] = useState(false);
   const [repeatMode, setRepeatMode] = useState<RepeatMode>('off');
+  const [sleepTimer, setSleepTimer] = useState<number | 'track' | null>(null);
   const [isVolumeReadOnly] = useState(() => playerService.detectReadOnlyVolume());
+
+  // Sync 5-band EQ
+  useEffect(() => {
+    if (settings.eqBands) {
+      playerService.setEqBands(settings.eqBands);
+    }
+  }, [settings.eqBands]);
+
+
 
   // UI Overlays
   const [isFullPlayerOpen, setFullPlayerOpen] = useState(false);
@@ -207,6 +220,24 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  // Sleep timer countdown
+  useEffect(() => {
+    if (typeof sleepTimer !== 'number' || sleepTimer <= 0 || !isPlaying) return;
+    const interval = window.setInterval(() => {
+      setSleepTimer((prev) => {
+        if (typeof prev !== 'number') return null;
+        if (prev <= 1) {
+          playerService.pause();
+          setIsPlaying(false);
+          showToast('Sleep timer ended playback', 'info');
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [sleepTimer, isPlaying, showToast]);
 
   // Apply theme & accent attributes to documentElement
   useEffect(() => {
@@ -431,6 +462,35 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     isPlaying,
   ]);
 
+  const crossfadeAndPlay = useCallback(
+    async (ids: string[], index: number) => {
+      if (!settings.crossfadeEnabled || settings.crossfadeDuration <= 0) {
+        await loadAndPlayByIndex(ids, index, true, 0);
+        return;
+      }
+      const durationMs = Math.min(settings.crossfadeDuration * 1000, 5000);
+      const steps = 8;
+      const stepInterval = durationMs / steps;
+      const origVol = settings.volume;
+
+      for (let i = steps; i >= 0; i--) {
+        const v = (origVol * i) / steps;
+        playerService.setVolume(v);
+        await new Promise((r) => window.setTimeout(r, stepInterval));
+      }
+
+      await loadAndPlayByIndex(ids, index, true, 0);
+
+      for (let i = 0; i <= steps; i++) {
+        const v = (origVol * i) / steps;
+        playerService.setVolume(v);
+        await new Promise((r) => window.setTimeout(r, stepInterval));
+      }
+      playerService.setVolume(origVol);
+    },
+    [settings.crossfadeEnabled, settings.crossfadeDuration, settings.volume, loadAndPlayByIndex]
+  );
+
   const nextTrack = useCallback(async () => {
     triggerHaptic('skip');
     playerService.primeAudioOnGesture(true);
@@ -462,8 +522,8 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return;
       }
     }
-    await loadAndPlayByIndex(ids, nextIdx, true, 0);
-  }, [loadAndPlayByIndex]);
+    await crossfadeAndPlay(ids, nextIdx);
+  }, [loadAndPlayByIndex, crossfadeAndPlay]);
 
   const prevTrack = useCallback(async () => {
     triggerHaptic('skip');
@@ -556,6 +616,13 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
       },
       onEnded: () => {
+        if (sleepTimer === 'track') {
+          playerService.pause();
+          setIsPlaying(false);
+          setSleepTimer(null);
+          showToast('Sleep timer ended playback at end of track', 'info');
+          return;
+        }
         const { queueIds: ids, currentIndex: idx, repeatMode: rep } = stateRef.current;
         if (rep === 'one') {
           playerService.seekTo(0);
@@ -563,9 +630,9 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return;
         }
         if (idx + 1 < ids.length) {
-          void loadAndPlayByIndex(ids, idx + 1, true, 0);
+          void crossfadeAndPlay(ids, idx + 1);
         } else if (rep === 'all' && ids.length > 0) {
-          void loadAndPlayByIndex(ids, 0, true, 0);
+          void crossfadeAndPlay(ids, 0);
         } else {
           setIsPlaying(false);
         }
@@ -636,6 +703,54 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       await loadAndPlayByIndex(activeIds, targetIdx, true, 0);
     },
     [songs, shuffle, loadAndPlayByIndex]
+  );
+
+  const startSongRadio = useCallback(
+    async (seedSong: Song) => {
+      triggerHaptic('playPause');
+      playerService.primeAudioOnGesture(true);
+
+      const scored = songs.map((s) => {
+        let score = 0;
+        if (s.id === seedSong.id) score += 100;
+        if (s.artist && seedSong.artist && s.artist.toLowerCase() === seedSong.artist.toLowerCase()) {
+          score += 20;
+        } else if (s.artist && seedSong.artist && (s.artist.toLowerCase().includes(seedSong.artist.toLowerCase()) || seedSong.artist.toLowerCase().includes(s.artist.toLowerCase()))) {
+          score += 12;
+        }
+        if (s.album && seedSong.album && s.album.toLowerCase() === seedSong.album.toLowerCase()) {
+          score += 8;
+        }
+        if (s.format === seedSong.format) {
+          score += 2;
+        }
+        score += Math.random() * 4;
+        return { song: s, score };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      const sortedSongs = scored.map((item) => item.song);
+      const seedIndex = sortedSongs.findIndex((s) => s.id === seedSong.id);
+      if (seedIndex > 0) {
+        const [removed] = sortedSongs.splice(seedIndex, 1);
+        sortedSongs.unshift(removed);
+      }
+
+      let radioQueue = sortedSongs;
+      if (radioQueue.length < 10 && radioQueue.length > 0) {
+        radioQueue = [...radioQueue, ...shuffleArray(radioQueue)];
+      }
+
+      const origIds = radioQueue.map((s) => s.id);
+      for (const s of radioQueue) {
+        stateRef.current.songMap.set(s.id, s);
+      }
+      setOriginalQueueIds(origIds);
+      setQueueIds(origIds);
+      await loadAndPlayByIndex(origIds, 0, true, 0);
+      showToast(`Started Song Radio for "${seedSong.title}"`, 'success');
+    },
+    [songs, loadAndPlayByIndex, showToast]
   );
 
   const playList = useCallback(
@@ -1211,8 +1326,11 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     shuffle,
     repeatMode,
     isVolumeReadOnly,
+    sleepTimer,
+    setSleepTimer,
     playSong,
     playList,
+    startSongRadio,
     togglePlayPause,
     nextTrack,
     prevTrack,

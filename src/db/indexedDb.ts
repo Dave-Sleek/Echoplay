@@ -28,6 +28,9 @@ export const DEFAULT_SETTINGS: UserSettings = {
   volume: 1,
   hapticsEnabled: true,
   audioNormalization: false,
+  eqBands: [0, 0, 0, 0, 0],
+  crossfadeEnabled: false,
+  crossfadeDuration: 4,
 };
 
 let dbPromise: Promise<IDBDatabase> | null = null;

@@ -37,6 +37,9 @@ export const SettingsView: React.FC = () => {
     clearMusicLibrary,
     resetAllData,
     setPlaybackRate,
+    sleepTimer,
+    setSleepTimer,
+    showToast,
   } = useEchoPlay();
 
   const { isInstalled } = usePWAInstall();
@@ -295,6 +298,173 @@ export const SettingsView: React.FC = () => {
           >
             <span className="w-6 h-6 rounded-full bg-white shadow-sm" />
           </button>
+        </div>
+      </section>
+
+      {/* 5-Band Equalizer */}
+      <section className="rounded-3xl bg-white/80 dark:bg-[#13151B] border border-black/[0.06] dark:border-white/[0.07] p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-bold text-zinc-900 dark:text-white">5-Band Equalizer</h2>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Adjust audio output frequency response</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic('tap');
+              void updateSettings({ eqBands: [0, 0, 0, 0, 0] });
+            }}
+            className="text-xs font-semibold text-[var(--accent)] hover:underline"
+          >
+            Reset EQ
+          </button>
+        </div>
+
+        <div className="grid grid-cols-5 gap-2 pt-2">
+          {[
+            { label: '60 Hz', sub: 'Sub Bass' },
+            { label: '230 Hz', sub: 'Bass' },
+            { label: '910 Hz', sub: 'Mid' },
+            { label: '4 kHz', sub: 'Presence' },
+            { label: '14 kHz', sub: 'Brilliance' },
+          ].map((band, idx) => {
+            const bands = settings.eqBands || [0, 0, 0, 0, 0];
+            const val = bands[idx] ?? 0;
+            return (
+              <div key={band.label} className="flex flex-col items-center gap-2">
+                <span className="text-[11px] font-bold tabular-nums text-zinc-900 dark:text-white">
+                  {val > 0 ? `+${val.toFixed(1)}` : val.toFixed(1)} dB
+                </span>
+                <div className="h-32 py-1 flex items-center justify-center">
+                  <input
+                    type="range"
+                    min="-12"
+                    max="12"
+                    step="0.5"
+                    value={val}
+                    onChange={(e) => {
+                      const num = parseFloat(e.target.value);
+                      const nextBands = [...bands] as [number, number, number, number, number];
+                      nextBands[idx] = num;
+                      void updateSettings({ eqBands: nextBands });
+                    }}
+                    className="w-28 h-2 accent-[var(--accent)] cursor-pointer transform -rotate-90"
+                  />
+                </div>
+                <div className="text-center">
+                  <p className="text-xs font-semibold text-zinc-800 dark:text-zinc-200">{band.label}</p>
+                  <p className="text-[10px] text-zinc-500 dark:text-zinc-400">{band.sub}</p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* Crossfade & Sleep Timer */}
+      <section className="rounded-3xl bg-white/80 dark:bg-[#13151B] border border-black/[0.06] dark:border-white/[0.07] p-5 space-y-5">
+        <h2 className="text-base font-bold text-zinc-900 dark:text-white">Transitions & Sleep Timer</h2>
+
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold text-zinc-900 dark:text-white">Crossfade Songs</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Smoothly blend into the next track</p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.crossfadeEnabled ?? false}
+            onClick={() => {
+              triggerHaptic('tap');
+              void updateSettings({ crossfadeEnabled: !(settings.crossfadeEnabled ?? false) });
+            }}
+            className={`w-12 h-7 rounded-full transition-colors p-0.5 flex items-center shrink-0 ${
+              settings.crossfadeEnabled ?? false ? 'bg-[var(--accent)] justify-end' : 'bg-zinc-300 dark:bg-zinc-700 justify-start'
+            }`}
+          >
+            <span className="w-6 h-6 rounded-full bg-white shadow-sm" />
+          </button>
+        </div>
+
+        {settings.crossfadeEnabled && (
+          <div className="pt-2 flex items-center justify-between gap-4">
+            <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Crossfade Duration</span>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min="1"
+                max="12"
+                step="1"
+                value={settings.crossfadeDuration ?? 4}
+                onChange={(e) => {
+                  void updateSettings({ crossfadeDuration: parseInt(e.target.value, 10) });
+                }}
+                className="w-32 accent-[var(--accent)]"
+              />
+              <span className="text-xs font-bold tabular-nums text-zinc-900 dark:text-white w-8">
+                {settings.crossfadeDuration ?? 4}s
+              </span>
+            </div>
+          </div>
+        )}
+
+        <div className="pt-4 border-t border-black/[0.06] dark:border-white/[0.06] space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-semibold text-zinc-900 dark:text-white">Sleep Timer</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                {typeof sleepTimer === 'number'
+                  ? `Pausing in ${Math.floor(sleepTimer / 60)}m ${sleepTimer % 60}s`
+                  : sleepTimer === 'track'
+                  ? 'Pausing at end of current track'
+                  : 'Automatically pause playback after a countdown'}
+              </p>
+            </div>
+            {sleepTimer !== null && (
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic('tap');
+                  setSleepTimer(null);
+                  showToast('Sleep timer cancelled');
+                }}
+                className="text-xs font-semibold text-red-500 hover:underline"
+              >
+                Cancel Timer
+              </button>
+            )}
+          </div>
+          <div className="grid grid-cols-5 gap-1.5 pt-1">
+            {[
+              { label: 'Off', val: null },
+              { label: '15m', val: 900 },
+              { label: '30m', val: 1800 },
+              { label: '60m', val: 3600 },
+              { label: 'Track', val: 'track' },
+            ].map((item) => {
+              const active = sleepTimer === item.val;
+              return (
+                <button
+                  key={item.label}
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic('selection');
+                    setSleepTimer(item.val as any);
+                    if (item.val !== null) {
+                      showToast(`Sleep timer set to ${item.label}`, 'success');
+                    }
+                  }}
+                  className={`min-h-[38px] px-2 rounded-xl text-xs font-semibold transition-colors ${
+                    active
+                      ? 'bg-[var(--accent)] text-white shadow-sm'
+                      : 'bg-black/[0.05] dark:bg-white/[0.07] text-zinc-700 dark:text-zinc-300 hover:bg-black/[0.08]'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </section>
 
