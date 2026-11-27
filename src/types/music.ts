@@ -19,6 +19,7 @@ export interface Song {
   addedAt: number;
   playCount: number;
   lastPlayedAt?: number;
+  lastPosition?: number;
   isFavorite: boolean;
 }
 
@@ -58,6 +59,7 @@ export interface UserSettings {
   volume: number;
   hapticsEnabled: boolean;
   audioNormalization: boolean;
+  autoResumeEnabled?: boolean;
   eqBands: [number, number, number, number, number]; // 60Hz, 230Hz, 910Hz, 4kHz, 14kHz (-12dB to +12dB)
   crossfadeEnabled: boolean;
   crossfadeDuration: number; // seconds (1 to 12)

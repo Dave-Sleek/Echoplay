@@ -44,6 +44,7 @@ import {
   extractAudioMetadata,
   resolveAudioMimeType,
 } from '../utils/audioMetadata';
+import { formatDuration } from '../utils/formatters';
 import { setHapticsEnabled, triggerHaptic } from '../utils/haptics';
 
 interface EchoPlayContextValue {
@@ -170,12 +171,16 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [sleepTimer, setSleepTimer] = useState<number | 'track' | null>(null);
   const [isVolumeReadOnly] = useState(() => playerService.detectReadOnlyVolume());
 
-  // Sync 5-band EQ
+  // Sync 5-band EQ & Crossfade state
   useEffect(() => {
     if (settings.eqBands) {
       playerService.setEqBands(settings.eqBands);
     }
   }, [settings.eqBands]);
+
+  useEffect(() => {
+    playerService.setCrossfadeEnabled(settings.crossfadeEnabled ?? false);
+  }, [settings.crossfadeEnabled]);
 
 
 
@@ -305,13 +310,66 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // Refs for stable event callbacks
   const stateRef = useRef({
     queueIds,
+    originalQueueIds,
     currentIndex,
     repeatMode,
     shuffle,
     currentSong,
     songMap,
+    settings,
+    sleepTimer,
+    currentTime,
+    duration,
   });
-  stateRef.current = { queueIds, currentIndex, repeatMode, shuffle, currentSong, songMap };
+  stateRef.current = {
+    queueIds,
+    originalQueueIds,
+    currentIndex,
+    repeatMode,
+    shuffle,
+    currentSong,
+    songMap,
+    settings,
+    sleepTimer,
+    currentTime,
+    duration,
+  };
+
+  const autoCrossfadeKeyRef = useRef<string | null>(null);
+
+  const persistSongPosition = useCallback(
+    (songId: string, positionSec: number, durationSec: number) => {
+      const target = stateRef.current.songMap.get(songId);
+      if (!target) return;
+      const effectiveDur = durationSec > 0 ? durationSec : target.duration || 0;
+      const clamped =
+        positionSec >= 3 && (effectiveDur === 0 || positionSec < effectiveDur - 5)
+          ? Math.round(positionSec * 10) / 10
+          : 0;
+      if ((target.lastPosition ?? 0) === clamped) return;
+
+      const updated: Song = { ...target, lastPosition: clamped };
+      stateRef.current.songMap.set(songId, updated);
+      setSongs((prev) => prev.map((s) => (s.id === songId ? updated : s)));
+      void updateSong(updated).catch(() => {});
+    },
+    []
+  );
+
+  const flushPlaybackSnapshot = useCallback((timeOverride?: number) => {
+    const st = stateRef.current;
+    const activeTime = timeOverride ?? st.currentTime;
+    void savePlaybackSnapshot({
+      currentSongId: st.currentSong?.id ?? null,
+      queueIds: st.queueIds,
+      originalQueueIds: st.originalQueueIds,
+      currentIndex: st.currentIndex,
+      currentTime: activeTime,
+      shuffle: st.shuffle,
+      repeatMode: st.repeatMode,
+      updatedAt: Date.now(),
+    }).catch(() => {});
+  }, []);
 
   const markSongPlayed = useCallback(async (song: Song) => {
     const updated: Song = {
@@ -327,10 +385,18 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const loadAndPlayByIndex = useCallback(
     async (ids: string[], index: number, autoPlay: boolean, startTime = 0) => {
+      const prevSong = stateRef.current.currentSong;
+      const prevTime = playerService.currentTime;
+      const prevDur = playerService.duration || stateRef.current.duration;
+      if (prevSong && prevSong.id !== ids[index] && prevTime > 0) {
+        persistSongPosition(prevSong.id, prevTime, prevDur);
+      }
+
       const id = ids[index];
       const song = id ? stateRef.current.songMap.get(id) : undefined;
       if (!song) return;
 
+      autoCrossfadeKeyRef.current = null;
       setCurrentIndex(index);
       setCurrentTime(startTime);
       setDuration(song.duration || 0);
@@ -389,6 +455,10 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setSettings(loadedSettings);
         playerService.setVolume(loadedSettings.volume);
         playerService.setPlaybackRate(loadedSettings.playbackRate);
+        playerService.setCrossfadeEnabled(loadedSettings.crossfadeEnabled ?? false);
+        if (loadedSettings.eqBands) {
+          playerService.setEqBands(loadedSettings.eqBands);
+        }
 
         const loadedMap = new Map(loadedSongs.map((s) => [s.id, s]));
 
@@ -407,11 +477,12 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             setCurrentIndex(idx);
             const restoredSong = loadedMap.get(validQueue[idx]);
             if (restoredSong) {
-              setCurrentTime(snapshot.currentTime || 0);
+              const resumePos = snapshot.currentTime || restoredSong.lastPosition || 0;
+              setCurrentTime(resumePos);
               setDuration(restoredSong.duration || 0);
               // Preload silently without auto-playing (iOS requires user gesture for play)
               playerService
-                .loadSong(restoredSong, false, snapshot.currentTime || 0)
+                .loadSong(restoredSong, false, resumePos)
                 .catch(() => {});
             }
           }
@@ -432,24 +503,14 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, []);
 
-  // Persist Playback Snapshot (throttled)
+  // Persist Playback Snapshot (throttled while playing, immediate on pause/background/unload)
   const lastSnapshotTimeRef = useRef(0);
   useEffect(() => {
     if (!isHydrated) return;
     const now = Date.now();
-    if (now - lastSnapshotTimeRef.current < 1500 && isPlaying) return;
+    if (now - lastSnapshotTimeRef.current < 1000 && isPlaying) return;
     lastSnapshotTimeRef.current = now;
-
-    void savePlaybackSnapshot({
-      currentSongId: currentSong?.id ?? null,
-      queueIds,
-      originalQueueIds,
-      currentIndex,
-      currentTime,
-      shuffle,
-      repeatMode,
-      updatedAt: now,
-    }).catch(() => {});
+    flushPlaybackSnapshot();
   }, [
     isHydrated,
     currentSong?.id,
@@ -460,35 +521,73 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     shuffle,
     repeatMode,
     isPlaying,
+    flushPlaybackSnapshot,
   ]);
 
+  useEffect(() => {
+    const handleFlush = () => {
+      if (!isHydrated) return;
+      const curTime = playerService.currentTime || stateRef.current.currentTime;
+      const curSong = stateRef.current.currentSong;
+      const curDur = playerService.duration || stateRef.current.duration;
+      flushPlaybackSnapshot(curTime);
+      if (curSong && curTime > 0) {
+        persistSongPosition(curSong.id, curTime, curDur);
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') handleFlush();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', handleFlush);
+    window.addEventListener('beforeunload', handleFlush);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', handleFlush);
+      window.removeEventListener('beforeunload', handleFlush);
+    };
+  }, [isHydrated, flushPlaybackSnapshot, persistSongPosition]);
+
   const crossfadeAndPlay = useCallback(
-    async (ids: string[], index: number) => {
-      if (!settings.crossfadeEnabled || settings.crossfadeDuration <= 0) {
+    async (ids: string[], index: number, fadeDurationOverride?: number) => {
+      const cfg = stateRef.current.settings;
+      const fadeSec = fadeDurationOverride ?? (cfg.crossfadeEnabled ? cfg.crossfadeDuration || 4 : 0);
+
+      if (!cfg.crossfadeEnabled || fadeSec <= 0 || playerService.paused || !playerService.hasActiveSource()) {
         await loadAndPlayByIndex(ids, index, true, 0);
         return;
       }
-      const durationMs = Math.min(settings.crossfadeDuration * 1000, 5000);
-      const steps = 8;
-      const stepInterval = durationMs / steps;
-      const origVol = settings.volume;
 
-      for (let i = steps; i >= 0; i--) {
-        const v = (origVol * i) / steps;
-        playerService.setVolume(v);
-        await new Promise((r) => window.setTimeout(r, stepInterval));
+      const prevSong = stateRef.current.currentSong;
+      const id = ids[index];
+      const song = id ? stateRef.current.songMap.get(id) : undefined;
+      if (!song) return;
+
+      if (prevSong) {
+        persistSongPosition(prevSong.id, 0, prevSong.duration || 0);
       }
 
-      await loadAndPlayByIndex(ids, index, true, 0);
+      autoCrossfadeKeyRef.current = null;
+      setCurrentIndex(index);
+      setCurrentTime(0);
+      setDuration(song.duration || 0);
+      handlingLoadErrorRef.current = true;
 
-      for (let i = 0; i <= steps; i++) {
-        const v = (origVol * i) / steps;
-        playerService.setVolume(v);
-        await new Promise((r) => window.setTimeout(r, stepInterval));
+      try {
+        const ok = await playerService.crossfadeToSong(song, fadeSec, 0);
+        if (!ok) return;
+        setIsPlaying(!playerService.paused);
+        if (!playerService.paused) {
+          void markSongPlayed(song);
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        await loadAndPlayByIndex(ids, index, true, 0);
+      } finally {
+        handlingLoadErrorRef.current = false;
       }
-      playerService.setVolume(origVol);
     },
-    [settings.crossfadeEnabled, settings.crossfadeDuration, settings.volume, loadAndPlayByIndex]
+    [loadAndPlayByIndex, markSongPlayed, persistSongPosition]
   );
 
   const nextTrack = useCallback(async () => {
@@ -522,7 +621,10 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return;
       }
     }
-    await crossfadeAndPlay(ids, nextIdx);
+    const skipFadeSec = stateRef.current.settings.crossfadeEnabled
+      ? Math.min(stateRef.current.settings.crossfadeDuration || 3, 2.5)
+      : 0;
+    await crossfadeAndPlay(ids, nextIdx, skipFadeSec);
   }, [loadAndPlayByIndex, crossfadeAndPlay]);
 
   const prevTrack = useCallback(async () => {
@@ -541,8 +643,11 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (prevIdx < 0) {
       prevIdx = rep === 'all' ? ids.length - 1 : 0;
     }
-    await loadAndPlayByIndex(ids, prevIdx, true, 0);
-  }, [loadAndPlayByIndex]);
+    const skipFadeSec = stateRef.current.settings.crossfadeEnabled
+      ? Math.min(stateRef.current.settings.crossfadeDuration || 3, 2.5)
+      : 0;
+    await crossfadeAndPlay(ids, prevIdx, skipFadeSec);
+  }, [crossfadeAndPlay]);
 
   const togglePlayPause = useCallback(async () => {
     triggerHaptic('playPause');
@@ -554,13 +659,18 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         for (const s of songs) stateRef.current.songMap.set(s.id, s);
         setQueueIds(list);
         setOriginalQueueIds(list);
-        await loadAndPlayByIndex(list, 0, true, 0);
+        const firstSong = songs[0];
+        const resumeAt =
+          (stateRef.current.settings.autoResumeEnabled ?? true) && firstSong?.lastPosition
+            ? firstSong.lastPosition
+            : 0;
+        await loadAndPlayByIndex(list, 0, true, resumeAt);
       }
       return;
     }
 
     if (!playerService.hasActiveSource() && ids.length > 0 && stateRef.current.currentIndex >= 0) {
-      await loadAndPlayByIndex(ids, stateRef.current.currentIndex, true, currentTime);
+      await loadAndPlayByIndex(ids, stateRef.current.currentIndex, true, stateRef.current.currentTime);
       return;
     }
 
@@ -570,25 +680,73 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setIsPlaying(!playerService.paused);
       } catch {
         // Retry loading blob if ObjectURL became stale after iOS background suspension
-        await loadAndPlayByIndex(ids, stateRef.current.currentIndex, true, playerService.currentTime || 0);
+        await loadAndPlayByIndex(
+          ids,
+          stateRef.current.currentIndex,
+          true,
+          playerService.currentTime || stateRef.current.currentTime || 0
+        );
       }
     } else {
+      const pauseAt = playerService.currentTime;
       playerService.pause();
       setIsPlaying(false);
+      setCurrentTime(pauseAt);
+      persistSongPosition(song.id, pauseAt, playerService.duration || stateRef.current.duration);
+      flushPlaybackSnapshot(pauseAt);
     }
-  }, [songs, currentTime, loadAndPlayByIndex]);
+  }, [songs, loadAndPlayByIndex, persistSongPosition, flushPlaybackSnapshot]);
 
-  const seekTo = useCallback((seconds: number) => {
-    playerService.seekTo(seconds);
-    setCurrentTime(seconds);
-  }, []);
+  const seekTo = useCallback(
+    (seconds: number) => {
+      playerService.seekTo(seconds);
+      setCurrentTime(seconds);
+      const cur = stateRef.current.currentSong;
+      if (cur) {
+        persistSongPosition(cur.id, seconds, playerService.duration || stateRef.current.duration);
+      }
+      flushPlaybackSnapshot(seconds);
+    },
+    [persistSongPosition, flushPlaybackSnapshot]
+  );
 
   // Wire unified Audio Player events & Media Session API
   useEffect(() => {
     playerService.setEventCallbacks({
       onTimeUpdate: () => {
-        setCurrentTime(playerService.currentTime);
+        const curTime = playerService.currentTime;
+        const dur = playerService.duration || stateRef.current.duration;
+        setCurrentTime(curTime);
         playerService.syncMediaSessionPosition();
+
+        // Proactive Crossfade: begin overlapping transition BEFORE current track ends
+        const st = stateRef.current;
+        const cfg = st.settings;
+        if (
+          cfg.crossfadeEnabled &&
+          cfg.crossfadeDuration > 0 &&
+          st.repeatMode !== 'one' &&
+          st.sleepTimer !== 'track' &&
+          st.currentSong &&
+          !playerService.paused &&
+          dur > cfg.crossfadeDuration + 1.5
+        ) {
+          const remaining = dur - curTime;
+          const fadeWindow = Math.min(cfg.crossfadeDuration, dur * 0.4);
+          if (remaining > 0.15 && remaining <= fadeWindow) {
+            const nextIdx =
+              st.currentIndex + 1 < st.queueIds.length
+                ? st.currentIndex + 1
+                : st.repeatMode === 'all' && st.queueIds.length > 0
+                  ? 0
+                  : -1;
+            const triggerKey = `${st.currentSong.id}:${st.currentIndex}`;
+            if (nextIdx >= 0 && autoCrossfadeKeyRef.current !== triggerKey) {
+              autoCrossfadeKeyRef.current = triggerKey;
+              void crossfadeAndPlay(st.queueIds, nextIdx, fadeWindow);
+            }
+          }
+        }
       },
       onLoadedMetadata: () => {
         const dur = playerService.duration;
@@ -611,19 +769,29 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       },
       onPause: () => {
         setIsPlaying(false);
+        const curSong = stateRef.current.currentSong;
+        const curTime = playerService.currentTime;
+        if (curSong && curTime > 0 && !playerService.isSilentPreload) {
+          persistSongPosition(curSong.id, curTime, playerService.duration || stateRef.current.duration);
+          flushPlaybackSnapshot(curTime);
+        }
         if ('mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'paused';
         }
       },
       onEnded: () => {
-        if (sleepTimer === 'track') {
+        const st = stateRef.current;
+        if (st.currentSong) {
+          persistSongPosition(st.currentSong.id, 0, st.currentSong.duration || 0);
+        }
+        if (st.sleepTimer === 'track') {
           playerService.pause();
           setIsPlaying(false);
           setSleepTimer(null);
           showToast('Sleep timer ended playback at end of track', 'info');
           return;
         }
-        const { queueIds: ids, currentIndex: idx, repeatMode: rep } = stateRef.current;
+        const { queueIds: ids, currentIndex: idx, repeatMode: rep } = st;
         if (rep === 'one') {
           playerService.seekTo(0);
           playerService.play().catch(() => {});
@@ -673,7 +841,16 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return () => {
       playerService.setEventCallbacks(null);
     };
-  }, [loadAndPlayByIndex, nextTrack, prevTrack, seekTo, showToast]);
+  }, [
+    loadAndPlayByIndex,
+    crossfadeAndPlay,
+    nextTrack,
+    prevTrack,
+    seekTo,
+    showToast,
+    persistSongPosition,
+    flushPlaybackSnapshot,
+  ]);
 
   const playSong = useCallback(
     async (song: Song, contextQueue?: Song[]) => {
@@ -700,9 +877,21 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       stateRef.current.songMap.set(song.id, song);
       setOriginalQueueIds(origIds);
       setQueueIds(activeIds);
-      await loadAndPlayByIndex(activeIds, targetIdx, true, 0);
+
+      const autoResume = stateRef.current.settings.autoResumeEnabled ?? true;
+      const savedPos = song.lastPosition ?? 0;
+      const shouldResume =
+        autoResume &&
+        savedPos >= 3 &&
+        (song.duration === 0 || savedPos < song.duration - 5);
+
+      const startAt = shouldResume ? savedPos : 0;
+      await loadAndPlayByIndex(activeIds, targetIdx, true, startAt);
+      if (shouldResume) {
+        showToast(`Resumed "${song.title}" at ${formatDuration(savedPos)}`, 'info');
+      }
     },
-    [songs, shuffle, loadAndPlayByIndex]
+    [songs, shuffle, loadAndPlayByIndex, showToast]
   );
 
   const startSongRadio = useCallback(

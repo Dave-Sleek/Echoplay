@@ -78,10 +78,12 @@ interface ActiveTrackMeta {
 }
 
 class AudioPlayerService {
-  private audio: HTMLAudioElement;
-  private mode: 'html' | 'webaudio' = 'html';
-  private currentObjectUrl: string | null = null;
+  private decks: [HTMLAudioElement, HTMLAudioElement];
+  private activeDeckIndex: 0 | 1 = 0;
+  private deckObjectUrls: [string | null, string | null] = [null, null];
   private retiredObjectUrls = new Set<string>();
+
+  private mode: 'html' | 'webaudio' = 'html';
   private currentLoadedSongId: string | null = null;
   private activeTrackMeta: ActiveTrackMeta | null = null;
   private isIOSVolumeReadOnly: boolean | null = null;
@@ -96,21 +98,33 @@ class AudioPlayerService {
   private activePlayableBlob: Blob | null = null;
   private untypedFallbackTriedForToken = -1;
   private lastValidTime = 0;
+  private pendingResumeTime: number | null = null;
   private recoveryState: {
     token: number;
     promise: Promise<'recovered' | 'needs-gesture' | 'failed'>;
   } | null = null;
   private callbacks: PlayerEventCallbacks | null = null;
 
-  // Shared Web Audio graph (ReplayGain + Fallback AudioBufferSourceNode playback)
+  // Shared Web Audio graph (Dual-Deck Crossfade + 5-Band EQ + ReplayGain + Limiter)
   private audioCtx: AudioContext | null = null;
-  private mediaSource: MediaElementAudioSourceNode | null = null;
+  private deckMediaSources: [MediaElementAudioSourceNode | null, MediaElementAudioSourceNode | null] = [
+    null,
+    null,
+  ];
+  private deckGains: [GainNode | null, GainNode | null] = [null, null];
+  private eqFilters: BiquadFilterNode[] = [];
   private gainNode: GainNode | null = null;
   private masterVolumeNode: GainNode | null = null;
   private limiterNode: DynamicsCompressorNode | null = null;
   private normalizationEnabled = false;
+  private crossfadeEnabled = false;
   private currentGainDb = 0;
-  private eqFilters: BiquadFilterNode[] = [];
+  private pendingEqBands: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+
+  // Active crossfade cleanup tracking
+  private crossfadeTimerId: number | null = null;
+  private crossfadeRafId: number | null = null;
+  private fadingOutDeckIndex: 0 | 1 | null = null;
 
   // Web Audio buffer fallback state
   private wbBuffer: AudioBuffer | null = null;
@@ -122,27 +136,36 @@ class AudioPlayerService {
   private wbProgressTimer: number | null = null;
 
   constructor() {
-    // Reuse or pin a single persistent audio element in global scope + DOM so it is never GC'd
     const win =
       typeof window !== 'undefined'
-        ? (window as unknown as { __echoPlayAudioEngine?: HTMLAudioElement })
+        ? (window as unknown as {
+            __echoPlayAudioEngine?: HTMLAudioElement;
+            __echoPlayAudioEngineB?: HTMLAudioElement;
+          })
         : null;
-    const existing =
-      win?.__echoPlayAudioEngine ||
-      (typeof document !== 'undefined'
-        ? (document.getElementById('echoplay-audio-engine') as HTMLAudioElement | null)
-        : null);
 
-    this.audio = existing ?? document.createElement('audio');
-    this.audio.id = 'echoplay-audio-engine';
-    this.audio.preload = 'auto';
-    // Critical for iPhone Safari & PWA inline/background continuity
-    this.audio.setAttribute('playsinline', '');
-    this.audio.setAttribute('webkit-playsinline', '');
-    this.audio.style.display = 'none';
+    const createOrReuseDeck = (id: string, existing?: HTMLAudioElement | null): HTMLAudioElement => {
+      const fromDom =
+        existing ||
+        (typeof document !== 'undefined'
+          ? (document.getElementById(id) as HTMLAudioElement | null)
+          : null);
+      const el = fromDom ?? document.createElement('audio');
+      el.id = id;
+      el.preload = 'auto';
+      el.setAttribute('playsinline', '');
+      el.setAttribute('webkit-playsinline', '');
+      el.style.display = 'none';
+      return el;
+    };
+
+    const deckA = createOrReuseDeck('echoplay-audio-engine', win?.__echoPlayAudioEngine);
+    const deckB = createOrReuseDeck('echoplay-audio-engine-b', win?.__echoPlayAudioEngineB);
+    this.decks = [deckA, deckB];
 
     if (win) {
-      win.__echoPlayAudioEngine = this.audio;
+      win.__echoPlayAudioEngine = deckA;
+      win.__echoPlayAudioEngineB = deckB;
     }
 
     this.ensureAudioElementMounted();
@@ -160,57 +183,112 @@ class AudioPlayerService {
       });
     }
 
-    this.audio.addEventListener('loadedmetadata', () => {
+    this.decks.forEach((el, idx) => this.attachDeckListeners(el, idx as 0 | 1));
+  }
+
+  private get audio(): HTMLAudioElement {
+    return this.decks[this.activeDeckIndex];
+  }
+
+  private get standbyAudio(): HTMLAudioElement {
+    return this.decks[this.activeDeckIndex === 0 ? 1 : 0];
+  }
+
+  private get standbyDeckIndex(): 0 | 1 {
+    return this.activeDeckIndex === 0 ? 1 : 0;
+  }
+
+  private get currentObjectUrl(): string | null {
+    return this.deckObjectUrls[this.activeDeckIndex];
+  }
+
+  private set currentObjectUrl(url: string | null) {
+    this.deckObjectUrls[this.activeDeckIndex] = url;
+  }
+
+  private attachDeckListeners(el: HTMLAudioElement, deckIdx: 0 | 1): void {
+    const isActiveDeck = () => this.activeDeckIndex === deckIdx;
+
+    el.addEventListener('loadedmetadata', () => {
       try {
-        this.audio.playbackRate = this.targetPlaybackRate;
+        el.playbackRate = this.targetPlaybackRate;
       } catch {
         // Ignore
       }
+      if (!isActiveDeck()) return;
+
+      if (this.pendingResumeTime !== null && this.pendingResumeTime > 0.25) {
+        const dur = Number.isFinite(el.duration) ? el.duration : 0;
+        const target =
+          dur > 0 ? Math.min(this.pendingResumeTime, Math.max(0, dur - 0.5)) : this.pendingResumeTime;
+        if (target > 0.25 && Math.abs((el.currentTime || 0) - target) > 0.75) {
+          try {
+            el.currentTime = target;
+            this.lastValidTime = target;
+          } catch {
+            // Will retry on play()
+          }
+        }
+      }
+
       if (this.mode === 'html' && !this.isPriming) {
         this.callbacks?.onLoadedMetadata();
       }
     });
 
-    this.audio.addEventListener('loadeddata', () => {
+    el.addEventListener('loadeddata', () => {
+      if (!isActiveDeck()) return;
       if (this.mode === 'html' && !this.isPriming) {
         this.flushRetiredObjectUrls();
       }
     });
 
-    this.audio.addEventListener('timeupdate', () => {
-      if (this.mode === 'html' && !this.isPriming) {
-        if (Number.isFinite(this.audio.currentTime) && this.audio.currentTime > 0) {
-          this.lastValidTime = this.audio.currentTime;
+    el.addEventListener('timeupdate', () => {
+      if (!isActiveDeck()) return;
+      // Do not overwrite restored timestamp with 0 during startup silent preload
+      if (this.mode === 'html' && !this.isPriming && !this.isSilentPreload) {
+        if (Number.isFinite(el.currentTime) && el.currentTime > 0) {
+          this.lastValidTime = el.currentTime;
+          if (
+            this.pendingResumeTime !== null &&
+            Math.abs(el.currentTime - this.pendingResumeTime) < 2.5
+          ) {
+            this.pendingResumeTime = null;
+          }
         }
         this.callbacks?.onTimeUpdate();
       }
     });
 
-    this.audio.addEventListener('play', () => {
+    el.addEventListener('play', () => {
+      if (!isActiveDeck()) return;
       if (this.mode === 'html' && !this.isPriming) {
         this.callbacks?.onPlay();
       }
     });
 
-    this.audio.addEventListener('pause', () => {
+    el.addEventListener('pause', () => {
+      if (!isActiveDeck()) return;
       if (this.mode === 'html' && !this.isPriming) {
         this.callbacks?.onPause();
       }
     });
 
-    this.audio.addEventListener('ended', () => {
+    el.addEventListener('ended', () => {
+      if (!isActiveDeck()) return;
       if (this.mode === 'html' && !this.isPriming) {
         this.callbacks?.onEnded();
       }
     });
 
-    this.audio.addEventListener('error', () => {
+    el.addEventListener('error', () => {
+      if (!isActiveDeck()) return;
       if (this.mode !== 'html' || this.isPriming) return;
-      if (!this.audio.getAttribute('src')) return;
+      if (!el.getAttribute('src')) return;
 
       const token = this.loadToken;
       const diagnostics = this.getAudioErrorDiagnostics();
-      const mediaErr = this.audio.error;
+      const mediaErr = el.error;
       const errMsg = formatMediaError(mediaErr);
 
       if (this.isSilentPreload) {
@@ -230,7 +308,7 @@ class AudioPlayerService {
       ) {
         const resumeAt = Math.max(
           this.lastValidTime,
-          Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : 0
+          Number.isFinite(el.currentTime) ? el.currentTime : 0
         );
         console.warn('[EchoPlay] HTMLAudioElement media error — attempting recovery:', {
           ...diagnostics,
@@ -253,8 +331,11 @@ class AudioPlayerService {
   private ensureAudioElementMounted(): void {
     if (typeof document === 'undefined') return;
     const mount = () => {
-      if (document.body && !document.body.contains(this.audio)) {
-        document.body.appendChild(this.audio);
+      if (!document.body) return;
+      for (const deck of this.decks) {
+        if (!document.body.contains(deck)) {
+          document.body.appendChild(deck);
+        }
       }
     };
     if (document.body) {
@@ -265,13 +346,13 @@ class AudioPlayerService {
   }
 
   private retireObjectUrl(url: string | null): void {
-    if (!url || url === this.currentObjectUrl) return;
+    if (!url || this.deckObjectUrls.includes(url)) return;
     this.retiredObjectUrls.add(url);
   }
 
   private flushRetiredObjectUrls(): void {
     for (const url of this.retiredObjectUrls) {
-      if (url !== this.currentObjectUrl) {
+      if (!this.deckObjectUrls.includes(url)) {
         try {
           URL.revokeObjectURL(url);
         } catch {
@@ -321,6 +402,9 @@ class AudioPlayerService {
       }
       return Math.max(0, Math.min(this.wbBuffer.duration, this.wbStartOffset));
     }
+    if (this.isSilentPreload && this.pendingResumeTime !== null) {
+      return this.pendingResumeTime;
+    }
     return this.audio.currentTime || 0;
   }
 
@@ -351,7 +435,7 @@ class AudioPlayerService {
 
   primeAudioOnGesture(willReplaceSource = false): void {
     this.ensureAudioElementMounted();
-    if (this.normalizationEnabled) {
+    if (this.normalizationEnabled || this.crossfadeEnabled || this.hasActiveEq()) {
       this.ensureAudioContextGraph(this.mode === 'html');
     }
     if (this.audioCtx && this.audioCtx.state !== 'running') {
@@ -362,8 +446,6 @@ class AudioPlayerService {
       return;
     }
 
-    // Only iOS/iPadOS Safari drops gesture activation across async IndexedDB reads;
-    // avoid mutating audio.src with a dummy WAV on desktop/Android browsers.
     if (!isAppleTouchDevice()) {
       return;
     }
@@ -409,7 +491,11 @@ class AudioPlayerService {
     }
   }
 
-  private ensureAudioContextGraph(attachMediaElement: boolean): boolean {
+  private hasActiveEq(): boolean {
+    return this.pendingEqBands.some((b) => Math.abs(b) > 0.01);
+  }
+
+  private ensureAudioContextGraph(attachActiveDeck: boolean, attachStandbyDeck = false): boolean {
     if (typeof window === 'undefined') return false;
 
     const AudioCtx =
@@ -423,8 +509,9 @@ class AudioPlayerService {
         const gain = ctx.createGain();
         const masterVol = ctx.createGain();
         const limiter = ctx.createDynamicsCompressor();
+        const deckGainA = ctx.createGain();
+        const deckGainB = ctx.createGain();
 
-        // Gentle brickwall safety limiter to prevent digital clipping on +dB boost
         limiter.threshold.value = -1.0;
         limiter.knee.value = 3.0;
         limiter.ratio.value = 12.0;
@@ -432,17 +519,17 @@ class AudioPlayerService {
         limiter.release.value = 0.12;
 
         const frequencies = [60, 230, 910, 4000, 14000];
-        const eqFilters = frequencies.map((freq) => {
+        const eqFilters = frequencies.map((freq, idx) => {
           const f = ctx.createBiquadFilter();
           f.type = 'peaking';
           f.frequency.value = freq;
           f.Q.value = 1.4;
-          f.gain.value = 0;
+          f.gain.value = this.pendingEqBands[idx] ?? 0;
           return f;
         });
 
-        // Connect EQ filters in series: eq[0] -> eq[1] -> eq[2] -> eq[3] -> eq[4] -> gain
-        let prev: AudioNode = eqFilters[0];
+        deckGainA.connect(eqFilters[0]);
+        deckGainB.connect(eqFilters[0]);
         for (let i = 0; i < eqFilters.length - 1; i++) {
           eqFilters[i].connect(eqFilters[i + 1]);
         }
@@ -464,16 +551,25 @@ class AudioPlayerService {
         };
 
         this.audioCtx = ctx;
+        this.deckGains = [deckGainA, deckGainB];
+        this.eqFilters = eqFilters;
         this.gainNode = gain;
         this.masterVolumeNode = masterVol;
         this.limiterNode = limiter;
-        this.eqFilters = eqFilters;
       }
 
-      if (attachMediaElement && !this.mediaSource && this.audioCtx && this.eqFilters.length > 0) {
-        const source = this.audioCtx.createMediaElementSource(this.audio);
-        source.connect(this.eqFilters[0]);
-        this.mediaSource = source;
+      const attachDeck = (idx: 0 | 1) => {
+        if (!this.audioCtx || !this.deckGains[idx] || this.deckMediaSources[idx]) return;
+        const source = this.audioCtx.createMediaElementSource(this.decks[idx]);
+        source.connect(this.deckGains[idx]!);
+        this.deckMediaSources[idx] = source;
+      };
+
+      if (attachActiveDeck) {
+        attachDeck(this.activeDeckIndex);
+      }
+      if (attachStandbyDeck) {
+        attachDeck(this.standbyDeckIndex);
       }
 
       if (this.masterVolumeNode) {
@@ -490,9 +586,19 @@ class AudioPlayerService {
     }
   }
 
+  setCrossfadeEnabled(enabled: boolean): void {
+    this.crossfadeEnabled = enabled;
+    if (enabled && (this.isAudioUnlocked || !this.paused)) {
+      this.ensureAudioContextGraph(this.mode === 'html', true);
+    }
+  }
+
   setEqBands(bands: [number, number, number, number, number]): void {
-    if (!this.audioCtx) {
-      this.ensureAudioContextGraph(this.mode === 'html');
+    this.pendingEqBands = bands;
+    if (!this.audioCtx && bands.some((b) => Math.abs(b) > 0.01)) {
+      if (this.isAudioUnlocked || !this.paused) {
+        this.ensureAudioContextGraph(this.mode === 'html');
+      }
     }
     const now = this.audioCtx ? this.audioCtx.currentTime : 0;
     bands.forEach((gainVal, i) => {
@@ -543,6 +649,66 @@ class AudioPlayerService {
     return this.isIOSVolumeReadOnly;
   }
 
+  private cancelActiveCrossfade(snapActiveDeckFull = true): void {
+    if (this.crossfadeTimerId !== null) {
+      window.clearTimeout(this.crossfadeTimerId);
+      this.crossfadeTimerId = null;
+    }
+    if (this.crossfadeRafId !== null) {
+      window.cancelAnimationFrame(this.crossfadeRafId);
+      this.crossfadeRafId = null;
+    }
+
+    if (this.fadingOutDeckIndex !== null) {
+      const idx = this.fadingOutDeckIndex;
+      this.fadingOutDeckIndex = null;
+      const outEl = this.decks[idx];
+      try {
+        outEl.pause();
+        outEl.removeAttribute('src');
+        outEl.load();
+      } catch {
+        // Ignore cleanup errors
+      }
+      const oldUrl = this.deckObjectUrls[idx];
+      this.deckObjectUrls[idx] = null;
+      this.retireObjectUrl(oldUrl);
+      this.flushRetiredObjectUrls();
+
+      const outGain = this.deckGains[idx];
+      if (outGain && this.audioCtx) {
+        try {
+          outGain.gain.cancelScheduledValues(this.audioCtx.currentTime);
+          outGain.gain.setValueAtTime(1, this.audioCtx.currentTime);
+        } catch {
+          outGain.gain.value = 1;
+        }
+      }
+      try {
+        outEl.volume = this.targetVolume;
+      } catch {
+        // Ignore iOS read-only volume
+      }
+    }
+
+    if (snapActiveDeckFull) {
+      const activeGain = this.deckGains[this.activeDeckIndex];
+      if (activeGain && this.audioCtx) {
+        try {
+          activeGain.gain.cancelScheduledValues(this.audioCtx.currentTime);
+          activeGain.gain.setValueAtTime(1, this.audioCtx.currentTime);
+        } catch {
+          activeGain.gain.value = 1;
+        }
+      }
+      try {
+        this.audio.volume = this.targetVolume;
+      } catch {
+        // Ignore iOS read-only volume
+      }
+    }
+  }
+
   private stopWebAudioEngine(clearBuffer = false): void {
     if (this.wbProgressTimer !== null) {
       window.clearInterval(this.wbProgressTimer);
@@ -579,15 +745,18 @@ class AudioPlayerService {
   }
 
   private startWebAudioSource(): void {
-    if (!this.audioCtx || !this.wbBuffer || !this.gainNode) return;
+    if (!this.audioCtx || !this.wbBuffer || !this.eqFilters[0]) return;
     this.stopWebAudioEngine(false);
 
     const source = this.audioCtx.createBufferSource();
     source.buffer = this.wbBuffer;
     source.playbackRate.value = this.targetPlaybackRate;
-    source.connect(this.gainNode);
+    source.connect(this.eqFilters[0]);
 
-    const offset = Math.max(0, Math.min(this.wbStartOffset, Math.max(0, this.wbBuffer.duration - 0.01)));
+    const offset = Math.max(
+      0,
+      Math.min(this.wbStartOffset, Math.max(0, this.wbBuffer.duration - 0.01))
+    );
     this.wbManualStop = false;
     source.onended = () => {
       if (this.wbManualStop || this.mode !== 'webaudio') return;
@@ -631,7 +800,7 @@ class AudioPlayerService {
     const decoded = await this.audioCtx.decodeAudioData(arrayBuf.slice(0));
     if (token !== this.loadToken) return false;
 
-    // Tear down HTMLAudioElement source cleanly so it stops emitting errors
+    this.cancelActiveCrossfade();
     this.isPriming = true;
     this.audio.pause();
     this.audio.removeAttribute('src');
@@ -647,6 +816,7 @@ class AudioPlayerService {
     const clampedStart = Math.max(0, Math.min(startTime, Math.max(0, decoded.duration - 0.1)));
     this.wbStartOffset = clampedStart;
     this.lastValidTime = clampedStart;
+    this.pendingResumeTime = null;
     if (this.masterVolumeNode) {
       this.masterVolumeNode.gain.value = this.targetVolume;
     }
@@ -655,20 +825,20 @@ class AudioPlayerService {
     return true;
   }
 
-  private waitForCanPlay(token: number, timeoutMs = 4000): Promise<void> {
-    if (this.audio.error) {
-      return Promise.reject(new Error(formatMediaError(this.audio.error)));
+  private waitForCanPlay(token: number, timeoutMs = 4000, el = this.audio): Promise<void> {
+    if (el.error) {
+      return Promise.reject(new Error(formatMediaError(el.error)));
     }
-    if (this.audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       return Promise.resolve();
     }
 
     return new Promise((resolve, reject) => {
       let settled = false;
       const cleanup = () => {
-        this.audio.removeEventListener('canplay', onReady);
-        this.audio.removeEventListener('loadeddata', onReady);
-        this.audio.removeEventListener('error', onError);
+        el.removeEventListener('canplay', onReady);
+        el.removeEventListener('loadeddata', onReady);
+        el.removeEventListener('error', onError);
         window.clearTimeout(timer);
       };
 
@@ -683,7 +853,7 @@ class AudioPlayerService {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(new Error(formatMediaError(this.audio.error)));
+        reject(new Error(formatMediaError(el.error)));
       };
 
       const timer = window.setTimeout(() => {
@@ -692,39 +862,24 @@ class AudioPlayerService {
         cleanup();
         if (token !== this.loadToken) {
           resolve();
-        } else if (this.audio.error) {
-          reject(new Error(formatMediaError(this.audio.error)));
+        } else if (el.error) {
+          reject(new Error(formatMediaError(el.error)));
         } else {
           resolve();
         }
       }, timeoutMs);
 
-      this.audio.addEventListener('canplay', onReady, { once: true });
-      this.audio.addEventListener('loadeddata', onReady, { once: true });
-      this.audio.addEventListener('error', onError, { once: true });
+      el.addEventListener('canplay', onReady, { once: true });
+      el.addEventListener('loadeddata', onReady, { once: true });
+      el.addEventListener('error', onError, { once: true });
     });
   }
 
-  async loadSong(song: Song, autoPlay: boolean, startTime = 0): Promise<boolean> {
-    const token = ++this.loadToken;
-    this.isSilentPreload = !autoPlay;
-    this.ensureAudioElementMounted();
-
-    if (autoPlay && this.primingPromise) {
-      try {
-        await this.primingPromise;
-      } catch {
-        // Ignore priming errors and proceed with real media load
-      }
-      if (token !== this.loadToken) return false;
-    }
-
+  private async preparePlayableBlob(song: Song): Promise<{ blob: Blob; mimeType: string }> {
     const materializedBlob = await getAudioFileBlob(song.id);
-    if (token !== this.loadToken) return false;
     if (!(materializedBlob instanceof Blob) || materializedBlob.size === 0) {
       throw new Error('Audio file missing or empty in IndexedDB storage');
     }
-
     const resolvedMime = resolveAudioMimeType(
       song.format,
       song.fileName,
@@ -734,6 +889,26 @@ class AudioPlayerService {
       materializedBlob.type === resolvedMime
         ? materializedBlob
         : new Blob([materializedBlob], { type: resolvedMime });
+    return { blob: playableBlob, mimeType: resolvedMime };
+  }
+
+  async loadSong(song: Song, autoPlay: boolean, startTime = 0): Promise<boolean> {
+    const token = ++this.loadToken;
+    this.cancelActiveCrossfade(true);
+    this.isSilentPreload = !autoPlay;
+    this.ensureAudioElementMounted();
+
+    if (autoPlay && this.primingPromise) {
+      try {
+        await this.primingPromise;
+      } catch {
+        // Ignore priming errors
+      }
+      if (token !== this.loadToken) return false;
+    }
+
+    const { blob: playableBlob, mimeType: resolvedMime } = await this.preparePlayableBlob(song);
+    if (token !== this.loadToken) return false;
 
     this.activePlayableBlob = playableBlob;
     this.activeTrackMeta = {
@@ -748,7 +923,6 @@ class AudioPlayerService {
       this.masterVolumeNode.gain.value = 1;
     }
 
-    // Invalidate any pending priming state cleanly before assigning the real track URL
     this.primingToken++;
     this.isPriming = false;
     this.audio.muted = false;
@@ -759,9 +933,11 @@ class AudioPlayerService {
       throw new Error('Failed to create valid blob URL for audio playback');
     }
 
+    const safeStart = Math.max(0, startTime);
     this.currentObjectUrl = url;
     this.currentLoadedSongId = song.id;
-    this.lastValidTime = Math.max(0, startTime);
+    this.lastValidTime = safeStart;
+    this.pendingResumeTime = safeStart > 0.25 ? safeStart : null;
     this.untypedFallbackTriedForToken = -1;
 
     if (this.audio.error) {
@@ -769,22 +945,26 @@ class AudioPlayerService {
       this.audio.load();
     }
     this.audio.src = url;
+    try {
+      this.audio.volume = this.targetVolume;
+    } catch {
+      // iOS read-only volume
+    }
     this.audio.defaultPlaybackRate = this.targetPlaybackRate;
     this.audio.playbackRate = this.targetPlaybackRate;
 
     this.retireObjectUrl(prevUrl);
-
     this.applyGainDb(song.replayGainDb ?? 0);
 
-    if (startTime > 0) {
+    if (safeStart > 0) {
       const applyStartTime = () => {
         if (token !== this.loadToken) return;
         try {
-          if (Number.isFinite(this.audio.duration) && startTime < this.audio.duration) {
-            this.audio.currentTime = startTime;
+          if (Number.isFinite(this.audio.duration) && safeStart < this.audio.duration) {
+            this.audio.currentTime = safeStart;
           }
         } catch {
-          // Ignore seek errors before metadata
+          // Will reapply in play()
         }
       };
       if (this.audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
@@ -799,6 +979,191 @@ class AudioPlayerService {
     if (autoPlay) {
       await this.play(token);
     }
+    return true;
+  }
+
+  async crossfadeToSong(song: Song, fadeSeconds: number, startTime = 0): Promise<boolean> {
+    if (this.mode !== 'html' || !this.hasActiveSource() || this.paused) {
+      return this.loadSong(song, true, startTime);
+    }
+
+    const token = ++this.loadToken;
+    this.cancelActiveCrossfade(true);
+    this.isSilentPreload = false;
+    this.ensureAudioElementMounted();
+
+    const { blob: playableBlob, mimeType: resolvedMime } = await this.preparePlayableBlob(song);
+    if (token !== this.loadToken) return false;
+
+    const url = URL.createObjectURL(playableBlob);
+    if (!url || !url.startsWith('blob:')) {
+      return this.loadSong(song, true, startTime);
+    }
+
+    const outgoingIdx = this.activeDeckIndex;
+    const incomingIdx = this.standbyDeckIndex;
+    const outgoingEl = this.decks[outgoingIdx];
+    const incomingEl = this.decks[incomingIdx];
+
+    // Attach Web Audio graph to both decks if possible (essential for iOS volume crossfade)
+    const graphReady = this.ensureAudioContextGraph(true, true);
+    if (this.audioCtx && this.audioCtx.state !== 'running') {
+      try {
+        await this.audioCtx.resume();
+      } catch {
+        // Fallback to HTML volume animation
+      }
+    }
+
+    const outgoingGain = this.deckGains[outgoingIdx];
+    const incomingGain = this.deckGains[incomingIdx];
+    const useWebAudioFade =
+      graphReady &&
+      Boolean(this.audioCtx) &&
+      Boolean(outgoingGain) &&
+      Boolean(incomingGain) &&
+      Boolean(this.deckMediaSources[outgoingIdx]) &&
+      Boolean(this.deckMediaSources[incomingIdx]);
+
+    const safeFadeSec = Math.max(0.5, Math.min(12, fadeSeconds));
+    const safeStart = Math.max(0, startTime);
+
+    // Prepare incoming deck at silent gain before starting
+    if (useWebAudioFade && this.audioCtx && incomingGain) {
+      const now = this.audioCtx.currentTime;
+      incomingGain.gain.cancelScheduledValues(now);
+      incomingGain.gain.setValueAtTime(0.0001, now);
+    }
+    try {
+      incomingEl.volume = useWebAudioFade ? this.targetVolume : 0;
+    } catch {
+      // iOS read-only volume
+    }
+
+    if (incomingEl.error) {
+      incomingEl.removeAttribute('src');
+      incomingEl.load();
+    }
+    const oldStandbyUrl = this.deckObjectUrls[incomingIdx];
+    this.deckObjectUrls[incomingIdx] = url;
+    this.retireObjectUrl(oldStandbyUrl);
+
+    incomingEl.muted = false;
+    incomingEl.src = url;
+    incomingEl.defaultPlaybackRate = this.targetPlaybackRate;
+    incomingEl.playbackRate = this.targetPlaybackRate;
+
+    // Wait briefly for incoming deck metadata/audio buffers
+    try {
+      await this.waitForCanPlay(token, 2500, incomingEl);
+    } catch {
+      if (token === this.loadToken) {
+        return this.loadSong(song, true, startTime);
+      }
+      return false;
+    }
+    if (token !== this.loadToken) return false;
+
+    if (safeStart > 0.25 && Number.isFinite(incomingEl.duration) && safeStart < incomingEl.duration) {
+      try {
+        incomingEl.currentTime = safeStart;
+      } catch {
+        // Reapply after play
+      }
+    }
+
+    // Swap active deck pointer BEFORE play() so UI listeners attach to the new track immediately
+    this.activeDeckIndex = incomingIdx;
+    this.fadingOutDeckIndex = outgoingIdx;
+    this.activePlayableBlob = playableBlob;
+    this.activeTrackMeta = {
+      songId: song.id,
+      fileName: song.fileName,
+      mimeType: resolvedMime,
+      blobSize: playableBlob.size,
+    };
+    this.currentLoadedSongId = song.id;
+    this.lastValidTime = safeStart;
+    this.pendingResumeTime = safeStart > 0.25 ? safeStart : null;
+    this.untypedFallbackTriedForToken = -1;
+    this.applyGainDb(song.replayGainDb ?? 0);
+    void this.updateMediaSessionMetadata(song);
+
+    try {
+      await incomingEl.play();
+      this.isAudioUnlocked = true;
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'playing';
+      }
+    } catch {
+      // If crossfade simultaneous play fails (e.g. strict single-stream policy), fallback cleanly
+      this.cancelActiveCrossfade(true);
+      return this.loadSong(song, true, startTime);
+    }
+
+    if (safeStart > 0.25 && Math.abs((incomingEl.currentTime || 0) - safeStart) > 1.2) {
+      try {
+        if (Number.isFinite(incomingEl.duration) && safeStart < incomingEl.duration) {
+          incomingEl.currentTime = safeStart;
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
+    // Run smooth equal-power/linear crossfade ramp on both decks simultaneously
+    if (useWebAudioFade && this.audioCtx && outgoingGain && incomingGain) {
+      const now = this.audioCtx.currentTime;
+      const currentOutGain = Math.max(0.0001, outgoingGain.gain.value || 1);
+      outgoingGain.gain.cancelScheduledValues(now);
+      outgoingGain.gain.setValueAtTime(currentOutGain, now);
+      outgoingGain.gain.linearRampToValueAtTime(0.0001, now + safeFadeSec);
+
+      incomingGain.gain.cancelScheduledValues(now);
+      incomingGain.gain.setValueAtTime(0.0001, now);
+      incomingGain.gain.linearRampToValueAtTime(1.0, now + safeFadeSec);
+    }
+
+    // Smooth HTML5 volume ramp (handles browsers without WebAudio graph attachment)
+    const startMs = performance.now();
+    const fadeMs = safeFadeSec * 1000;
+    const startOutVol = (() => {
+      try {
+        return outgoingEl.volume;
+      } catch {
+        return this.targetVolume;
+      }
+    })();
+
+    const stepFade = (nowMs: number) => {
+      if (this.fadingOutDeckIndex !== outgoingIdx) return;
+      const t = Math.min(1, (nowMs - startMs) / fadeMs);
+
+      if (!useWebAudioFade) {
+        try {
+          outgoingEl.volume = Math.max(0, startOutVol * (1 - t));
+          incomingEl.volume = Math.min(this.targetVolume, this.targetVolume * t);
+        } catch {
+          // Ignore iOS read-only volume
+        }
+      }
+
+      if (t < 1) {
+        this.crossfadeRafId = window.requestAnimationFrame(stepFade);
+      } else {
+        this.crossfadeRafId = null;
+      }
+    };
+    this.crossfadeRafId = window.requestAnimationFrame(stepFade);
+
+    this.crossfadeTimerId = window.setTimeout(() => {
+      this.crossfadeTimerId = null;
+      if (this.fadingOutDeckIndex === outgoingIdx) {
+        this.cancelActiveCrossfade(true);
+      }
+    }, fadeMs + 80);
+
+    this.callbacks?.onLoadedMetadata();
     return true;
   }
 
@@ -817,7 +1182,7 @@ class AudioPlayerService {
           this.activePlayableBlob = fresh;
         }
       } catch {
-        // Keep existing in-memory blob if IndexedDB lookup fails
+        // Keep existing in-memory blob
       }
     }
     if (!sourceBlob || token !== this.loadToken) return false;
@@ -842,7 +1207,7 @@ class AudioPlayerService {
       try {
         this.audio.currentTime = resumeAt;
       } catch {
-        // Ignore seek failure before playback starts
+        // Ignore seek failure
       }
     }
 
@@ -878,7 +1243,6 @@ class AudioPlayerService {
           if (retryErr instanceof DOMException && retryErr.name === 'NotAllowedError') {
             return 'needs-gesture';
           }
-          // Untyped HTMLAudioElement retry also failed; try Web Audio decode fallback
         }
 
         try {
@@ -900,7 +1264,7 @@ class AudioPlayerService {
             return 'needs-gesture';
           }
         } catch {
-          // Both HTMLAudioElement and Web Audio decoding failed
+          // Both failed
         }
         return 'failed';
       } finally {
@@ -936,8 +1300,8 @@ class AudioPlayerService {
       return;
     }
 
-    if (this.normalizationEnabled) {
-      this.ensureAudioContextGraph(true);
+    if (this.normalizationEnabled || this.crossfadeEnabled || this.hasActiveEq()) {
+      this.ensureAudioContextGraph(true, this.crossfadeEnabled);
     }
 
     if (this.audioCtx && this.audioCtx.state !== 'running') {
@@ -949,6 +1313,7 @@ class AudioPlayerService {
     }
 
     const resumeAt = Math.max(
+      this.pendingResumeTime ?? 0,
       this.lastValidTime,
       Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : 0
     );
@@ -963,8 +1328,26 @@ class AudioPlayerService {
       throw new Error(formatMediaError(initialError));
     }
 
+    const enforceResumeTimestamp = () => {
+      const target = this.pendingResumeTime;
+      if (target !== null && target > 0.25) {
+        const dur = Number.isFinite(this.audio.duration) ? this.audio.duration : 0;
+        const clamped = dur > 0 ? Math.min(target, Math.max(0, dur - 0.5)) : target;
+        if (Math.abs((this.audio.currentTime || 0) - clamped) > 1.2) {
+          try {
+            this.audio.currentTime = clamped;
+            this.lastValidTime = clamped;
+          } catch {
+            // Will retry after play()
+          }
+        }
+      }
+    };
+
     const attemptPlay = async () => {
+      enforceResumeTimestamp();
       await this.audio.play();
+      enforceResumeTimestamp();
       this.isAudioUnlocked = true;
       if ('mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
@@ -1016,6 +1399,7 @@ class AudioPlayerService {
   }
 
   pause(): void {
+    this.cancelActiveCrossfade(true);
     if (this.mode === 'webaudio') {
       if (this.wbPlaying) {
         this.wbStartOffset = this.currentTime;
@@ -1033,22 +1417,37 @@ class AudioPlayerService {
   stopAndClear(): void {
     this.loadToken++;
     this.primingToken++;
+    this.cancelActiveCrossfade(true);
     this.isPriming = false;
     this.isSilentPreload = false;
     this.activePlayableBlob = null;
     this.activeTrackMeta = null;
     this.currentLoadedSongId = null;
     this.lastValidTime = 0;
+    this.pendingResumeTime = null;
     this.recoveryState = null;
     this.stopWebAudioEngine(true);
     this.mode = 'html';
-    this.audio.pause();
-    this.audio.removeAttribute('src');
-    this.audio.load();
-    if (this.currentObjectUrl) {
-      URL.revokeObjectURL(this.currentObjectUrl);
-      this.currentObjectUrl = null;
-    }
+
+    this.decks.forEach((deck, idx) => {
+      try {
+        deck.pause();
+        deck.removeAttribute('src');
+        deck.load();
+      } catch {
+        // Ignore
+      }
+      const u = this.deckObjectUrls[idx];
+      if (u) {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {
+          // Ignore
+        }
+        this.deckObjectUrls[idx] = null;
+      }
+    });
+
     this.flushRetiredObjectUrls();
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'none';
@@ -1058,9 +1457,11 @@ class AudioPlayerService {
 
   seekTo(seconds: number): void {
     if (!Number.isFinite(seconds)) return;
+    this.cancelActiveCrossfade(true);
     const dur = this.duration;
     const clamped = Math.max(0, dur > 0 ? Math.min(seconds, dur) : seconds);
     this.lastValidTime = clamped;
+    this.pendingResumeTime = null;
 
     if (this.mode === 'webaudio') {
       const wasPlaying = this.wbPlaying;
@@ -1081,10 +1482,12 @@ class AudioPlayerService {
     if (this.masterVolumeNode) {
       this.masterVolumeNode.gain.value = this.mode === 'webaudio' ? clamped : 1;
     }
-    try {
-      this.audio.volume = clamped;
-    } catch {
-      // iOS Safari hardware volume
+    for (const deck of this.decks) {
+      try {
+        deck.volume = clamped;
+      } catch {
+        // iOS Safari hardware volume
+      }
     }
   }
 
@@ -1098,16 +1501,18 @@ class AudioPlayerService {
       try {
         this.wbSource.playbackRate.value = rate;
       } catch {
-        // Ignore invalid rate
+        // Ignore
       }
     }
-    try {
-      this.audio.defaultPlaybackRate = rate;
-      this.audio.playbackRate = rate;
-      this.syncMediaSessionPosition();
-    } catch {
-      // Ignore invalid rate
+    for (const deck of this.decks) {
+      try {
+        deck.defaultPlaybackRate = rate;
+        deck.playbackRate = rate;
+      } catch {
+        // Ignore
+      }
     }
+    this.syncMediaSessionPosition();
   }
 
   registerMediaSessionHandlers(callbacks: MediaSessionCallbacks): void {
@@ -1121,7 +1526,7 @@ class AudioPlayerService {
       try {
         ms.setActionHandler(action, handler);
       } catch {
-        // Some older Safari versions do not support all action types
+        // Unsupported action type
       }
     };
 
@@ -1201,7 +1606,7 @@ class AudioPlayerService {
         position: Math.min(position, duration),
       });
     } catch {
-      // Ignore invalid position state on transitional loads
+      // Ignore transitional position errors
     }
   }
 }

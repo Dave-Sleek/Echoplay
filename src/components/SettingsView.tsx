@@ -14,9 +14,10 @@ import {
 import { useEchoPlay } from '../context/EchoPlayContext';
 import { getStorageStats, type StorageStats } from '../db/indexedDb';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { playerService } from '../services/playerService';
 import type { AccentTheme, RepeatMode } from '../types/music';
 import { formatBytes } from '../utils/formatters';
-import { setHapticsEnabled, triggerHaptic } from '../utils/haptics';
+import { setHapticsEnabled, testHapticFeedback, triggerHaptic } from '../utils/haptics';
 import { ConfirmDialog } from './ConfirmDialog';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -272,32 +273,86 @@ export const SettingsView: React.FC = () => {
         <div className="pt-4 border-t border-black/[0.06] dark:border-white/[0.06] flex items-center justify-between gap-4">
           <div>
             <p className="text-sm font-semibold text-zinc-900 dark:text-white">
-              Haptic Feedback
+              Auto-Resume Exact Timestamp
             </p>
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Subtle tactile pulses on playback controls and gestures (on iPhone, requires iOS 17.4+ with System Haptics enabled)
+              Automatically resume tracks from the exact second you last paused or closed the app
             </p>
           </div>
           <button
             type="button"
             role="switch"
-            aria-checked={settings.hapticsEnabled ?? true}
+            aria-checked={settings.autoResumeEnabled ?? true}
             onClick={() => {
-              const next = !(settings.hapticsEnabled ?? true);
-              setHapticsEnabled(next);
-              void updateSettings({ hapticsEnabled: next });
-              if (next) {
-                triggerHaptic('playPause');
-              }
+              triggerHaptic('tap');
+              void updateSettings({ autoResumeEnabled: !(settings.autoResumeEnabled ?? true) });
             }}
             className={`w-12 h-7 rounded-full transition-colors p-0.5 flex items-center shrink-0 ${
-              settings.hapticsEnabled ?? true
+              settings.autoResumeEnabled ?? true
                 ? 'bg-[var(--accent)] justify-end'
                 : 'bg-zinc-300 dark:bg-zinc-700 justify-start'
             }`}
           >
             <span className="w-6 h-6 rounded-full bg-white shadow-sm" />
           </button>
+        </div>
+
+        <div className="pt-4 border-t border-black/[0.06] dark:border-white/[0.06] space-y-3">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                Haptic Feedback
+              </p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Subtle tactile pulses on playback controls and gestures
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.hapticsEnabled ?? true}
+              onClick={() => {
+                const next = !(settings.hapticsEnabled ?? true);
+                setHapticsEnabled(next);
+                void updateSettings({ hapticsEnabled: next });
+                if (next) {
+                  triggerHaptic('playPause');
+                }
+              }}
+              className={`w-12 h-7 rounded-full transition-colors p-0.5 flex items-center shrink-0 ${
+                settings.hapticsEnabled ?? true
+                  ? 'bg-[var(--accent)] justify-end'
+                  : 'bg-zinc-300 dark:bg-zinc-700 justify-start'
+              }`}
+            >
+              <span className="w-6 h-6 rounded-full bg-white shadow-sm" />
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 flex-wrap rounded-2xl bg-black/[0.03] dark:bg-white/[0.04] px-3.5 py-2.5">
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed flex-1 min-w-[200px]">
+              PWA note: Android uses the Vibration API (blocked if Battery Saver or Touch Vibration is off). iPhone blocks web vibration APIs, using iOS 17.4+ System Haptics on direct taps only.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                const result = testHapticFeedback();
+                if (result.triggered) {
+                  showToast(
+                    result.platform === 'ios-taptic'
+                      ? 'Sent iOS Taptic pulse (requires System Haptics ON)'
+                      : 'Vibration pulse triggered',
+                    'success'
+                  );
+                } else {
+                  showToast(result.reason || 'Haptics unavailable on this browser', 'error');
+                }
+              }}
+              className="min-h-[44px] px-3.5 rounded-xl bg-black/[0.06] dark:bg-white/[0.08] hover:bg-black/[0.1] dark:hover:bg-white/[0.14] text-xs font-semibold text-zinc-800 dark:text-zinc-100 transition-colors shrink-0"
+            >
+              Test Vibration
+            </button>
+          </div>
         </div>
       </section>
 
@@ -368,7 +423,9 @@ export const SettingsView: React.FC = () => {
         <div className="flex items-center justify-between gap-4">
           <div>
             <p className="text-sm font-semibold text-zinc-900 dark:text-white">Crossfade Songs</p>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">Smoothly blend into the next track</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Smoothly overlap the end of each song into the next track
+            </p>
           </div>
           <button
             type="button"
@@ -376,7 +433,11 @@ export const SettingsView: React.FC = () => {
             aria-checked={settings.crossfadeEnabled ?? false}
             onClick={() => {
               triggerHaptic('tap');
-              void updateSettings({ crossfadeEnabled: !(settings.crossfadeEnabled ?? false) });
+              const next = !(settings.crossfadeEnabled ?? false);
+              if (next) {
+                playerService.primeAudioOnGesture();
+              }
+              void updateSettings({ crossfadeEnabled: next });
             }}
             className={`w-12 h-7 rounded-full transition-colors p-0.5 flex items-center shrink-0 ${
               settings.crossfadeEnabled ?? false ? 'bg-[var(--accent)] justify-end' : 'bg-zinc-300 dark:bg-zinc-700 justify-start'

@@ -28,6 +28,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   volume: 1,
   hapticsEnabled: true,
   audioNormalization: false,
+  autoResumeEnabled: true,
   eqBands: [0, 0, 0, 0, 0],
   crossfadeEnabled: false,
   crossfadeDuration: 4,

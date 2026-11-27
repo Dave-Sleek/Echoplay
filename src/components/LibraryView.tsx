@@ -7,12 +7,14 @@ import {
   Music,
   Play,
   Plus,
+  Radio,
   Shuffle,
   User,
 } from 'lucide-react';
 import { useEchoPlay } from '../context/EchoPlayContext';
 import type { LibrarySubTab, Song, SortDirection, SortField } from '../types/music';
 import { formatDuration } from '../utils/formatters';
+import { triggerHaptic } from '../utils/haptics';
 import { AlbumArtwork } from './AlbumArtwork';
 import { EmptyState } from './EmptyState';
 import { SearchBar } from './SearchBar';
@@ -41,7 +43,7 @@ const SUB_TABS: Array<{ id: LibrarySubTab; label: string }> = [
 ];
 
 export const LibraryView: React.FC = () => {
-  const { songs, playList, setImportModalOpen } = useEchoPlay();
+  const { songs, playList, startSongRadio, setImportModalOpen } = useEchoPlay();
 
   const [subTab, setSubTab] = useState<LibrarySubTab>('songs');
   const [query, setQuery] = useState('');
@@ -160,6 +162,43 @@ export const LibraryView: React.FC = () => {
     [selectedArtistName, artists]
   );
 
+  const activeArtistAlbums = useMemo<AlbumGroup[]>(() => {
+    if (!activeArtist) return [];
+    const map = new Map<string, AlbumGroup>();
+    for (const s of activeArtist.songs) {
+      const albumName = s.album || 'Single / Unknown Album';
+      const existing = map.get(albumName);
+      if (existing) {
+        existing.songs.push(s);
+        if (!existing.artworkId && s.artworkId) existing.artworkId = s.artworkId;
+      } else {
+        map.set(albumName, {
+          name: albumName,
+          artist: activeArtist.name,
+          artworkId: s.artworkId,
+          songs: [s],
+        });
+      }
+    }
+    return Array.from(map.values())
+      .map((grp) => ({
+        ...grp,
+        songs: [...grp.songs].sort(
+          (a, b) =>
+            (a.trackNumber ?? 999) - (b.trackNumber ?? 999) ||
+            a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
+        ),
+      }))
+      .sort((a, b) => {
+        const yearA = a.songs[0]?.year ? parseInt(a.songs[0].year, 10) : 0;
+        const yearB = b.songs[0]?.year ? parseInt(b.songs[0].year, 10) : 0;
+        if (yearA !== yearB && !Number.isNaN(yearA) && !Number.isNaN(yearB)) {
+          return yearB - yearA;
+        }
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      });
+  }, [activeArtist]);
+
   const handleSortFieldChange = (field: SortField) => {
     if (sortField === field) {
       setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -218,9 +257,20 @@ export const LibraryView: React.FC = () => {
             <h1 className="text-2xl font-bold text-zinc-900 dark:text-white text-balance">
               {activeAlbum.name}
             </h1>
-            <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-              {activeAlbum.artist} · {ordered.length}{' '}
-              {ordered.length === 1 ? 'song' : 'songs'} · {formatDuration(totalDur)}
+            <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1 tabular-nums">
+              <button
+                type="button"
+                onClick={() => {
+                  triggerHaptic('tap');
+                  setSelectedArtistName(activeAlbum.artist);
+                  setSelectedAlbumName(null);
+                  setSubTab('artists');
+                }}
+                className="font-semibold text-[var(--accent)] hover:underline"
+              >
+                {activeAlbum.artist}
+              </button>{' '}
+              · {ordered.length} {ordered.length === 1 ? 'track' : 'tracks'} · {formatDuration(totalDur)}
             </p>
             <div className="mt-4 flex items-center justify-center sm:justify-start gap-2.5">
               <button
@@ -250,61 +300,150 @@ export const LibraryView: React.FC = () => {
     );
   }
 
-  // Artist Drill-Down View
+  // Dedicated Artist View (songs grouped by album + total track count)
   if (activeArtist) {
+    const totalDur = activeArtist.songs.reduce((acc, s) => acc + (s.duration || 0), 0);
+    const orderedArtistSongs = activeArtistAlbums.flatMap((alb) => alb.songs);
+
     return (
       <div className="space-y-6">
         <button
           type="button"
-          onClick={() => setSelectedArtistName(null)}
+          onClick={() => {
+            triggerHaptic('tap');
+            setSelectedArtistName(null);
+          }}
           className="min-h-[44px] px-3 -ml-2 rounded-xl inline-flex items-center gap-1.5 text-sm font-semibold text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
         >
           <ArrowLeft className="w-4 h-4" />
           Artists
         </button>
 
-        <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5">
+        {/* Artist Hero Header */}
+        <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 p-5 rounded-3xl bg-white/80 dark:bg-[#13151B]/90 border border-black/[0.06] dark:border-white/[0.07]">
           <AlbumArtwork
             artworkId={activeArtist.artworkId}
             fallbackKey={activeArtist.name}
             alt={activeArtist.name}
-            sizeClass="w-36 h-36"
+            sizeClass="w-32 h-32 sm:w-36 sm:h-36"
             radiusClass="rounded-full"
-            className="shadow-xl"
+            className="shadow-xl shrink-0"
           />
           <div className="flex-1 min-w-0 text-center sm:text-left">
-            <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">
+            <p className="text-xs font-semibold text-[var(--accent)] tracking-wide">
+              Artist
+            </p>
+            <h1 className="text-2xl sm:text-3xl font-bold text-zinc-900 dark:text-white mt-0.5 text-balance">
               {activeArtist.name}
             </h1>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1 tabular-nums">
-              {activeArtist.songs.length}{' '}
-              {activeArtist.songs.length === 1 ? 'song' : 'songs'} ·{' '}
-              {activeArtist.albumCount}{' '}
-              {activeArtist.albumCount === 1 ? 'album' : 'albums'}
+            <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1.5 tabular-nums">
+              <strong className="font-semibold text-zinc-900 dark:text-white">
+                {activeArtist.songs.length}
+              </strong>{' '}
+              {activeArtist.songs.length === 1 ? 'track' : 'tracks'} ·{' '}
+              {activeArtistAlbums.length}{' '}
+              {activeArtistAlbums.length === 1 ? 'album' : 'albums'} ·{' '}
+              {formatDuration(totalDur)}
             </p>
-            <div className="mt-4 flex items-center justify-center sm:justify-start gap-2.5">
+            <div className="mt-4 flex items-center justify-center sm:justify-start gap-2.5 flex-wrap">
               <button
                 type="button"
-                onClick={() => void playList(activeArtist.songs, 0, false)}
-                className="min-h-[44px] px-5 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-semibold inline-flex items-center gap-2"
+                onClick={() => void playList(orderedArtistSongs, 0, false)}
+                className="min-h-[44px] px-5 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-semibold inline-flex items-center gap-2 whitespace-nowrap"
               >
                 <Play className="w-4 h-4 fill-current" />
-                Play
+                Play All
               </button>
               <button
                 type="button"
-                onClick={() => void playList(activeArtist.songs, 0, true)}
-                className="min-h-[44px] px-5 rounded-xl bg-black/6 dark:bg-white/10 text-zinc-900 dark:text-white text-sm font-semibold inline-flex items-center gap-2"
+                onClick={() => void playList(orderedArtistSongs, 0, true)}
+                className="min-h-[44px] px-5 rounded-xl bg-black/6 dark:bg-white/10 text-zinc-900 dark:text-white text-sm font-semibold inline-flex items-center gap-2 whitespace-nowrap"
               >
                 <Shuffle className="w-4 h-4" />
                 Shuffle
               </button>
+              {orderedArtistSongs[0] && (
+                <button
+                  type="button"
+                  onClick={() => void startSongRadio(orderedArtistSongs[0])}
+                  className="min-h-[44px] px-4 rounded-xl bg-black/6 dark:bg-white/10 text-zinc-900 dark:text-white text-sm font-semibold inline-flex items-center gap-2 whitespace-nowrap"
+                >
+                  <Radio className="w-4 h-4 text-[var(--accent)]" />
+                  Radio
+                </button>
+              )}
             </div>
           </div>
         </div>
 
-        <div className="rounded-3xl bg-white/75 dark:bg-[#13151B]/85 border border-black/[0.05] dark:border-white/[0.06] p-2 sm:p-3">
-          <SongList songs={activeArtist.songs} />
+        {/* Albums Grouped Sections */}
+        <div className="space-y-5">
+          {activeArtistAlbums.map((album) => {
+            const albDur = album.songs.reduce((acc, s) => acc + (s.duration || 0), 0);
+            const albumYear = album.songs.find((s) => s.year)?.year;
+            return (
+              <section
+                key={album.name}
+                aria-label={`Album ${album.name}`}
+                className="rounded-3xl bg-white/75 dark:bg-[#13151B]/85 border border-black/[0.05] dark:border-white/[0.06] overflow-hidden"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 sm:p-5 border-b border-black/[0.05] dark:border-white/[0.06]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic('tap');
+                      setSelectedArtistName(null);
+                      setSelectedAlbumName(album.name);
+                      setSubTab('albums');
+                    }}
+                    className="flex items-center gap-3.5 min-w-0 text-left group"
+                  >
+                    <AlbumArtwork
+                      artworkId={album.artworkId}
+                      fallbackKey={`${album.name}-${activeArtist.name}`}
+                      alt={album.name}
+                      sizeClass="w-16 h-16"
+                      radiusClass="rounded-2xl"
+                      className="shadow-md shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <h2 className="text-base font-bold text-zinc-900 dark:text-white truncate group-hover:text-[var(--accent)] transition-colors">
+                        {album.name}
+                      </h2>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5 tabular-nums">
+                        {albumYear ? `${albumYear} · ` : ''}
+                        {album.songs.length} {album.songs.length === 1 ? 'track' : 'tracks'} ·{' '}
+                        {formatDuration(albDur)}
+                      </p>
+                    </div>
+                  </button>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void playList(album.songs, 0, false)}
+                      className="min-h-[40px] px-3.5 rounded-xl bg-black/[0.05] dark:bg-white/[0.08] hover:bg-black/[0.09] dark:hover:bg-white/[0.12] text-xs font-semibold text-zinc-900 dark:text-white inline-flex items-center gap-1.5 whitespace-nowrap"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      Play
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void playList(album.songs, 0, true)}
+                      aria-label={`Shuffle ${album.name}`}
+                      className="min-h-[40px] min-w-[40px] px-3 rounded-xl bg-black/[0.05] dark:bg-white/[0.08] hover:bg-black/[0.09] dark:hover:bg-white/[0.12] text-xs font-semibold text-zinc-900 dark:text-white inline-flex items-center justify-center"
+                    >
+                      <Shuffle className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-2 sm:p-3">
+                  <SongList songs={album.songs} showAlbum={false} numbered />
+                </div>
+              </section>
+            );
+          })}
         </div>
       </div>
     );
