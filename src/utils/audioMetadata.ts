@@ -253,6 +253,82 @@ function parseID3v2(buffer: ArrayBuffer): Partial<ParsedAudioMetadata> {
             if (Number.isFinite(parsedGain)) result.replayGainDb = parsedGain;
           }
         }
+      } else if (frameId === 'SYLT' && frameData.length > 7) {
+        const enc = frameData[0];
+        const tsFormat = frameData[4]; // 2 = milliseconds
+        let pos = 6; // enc(1) + lang(3) + tsFormat(1) + contentType(1)
+        const isUtf16 = enc === 1 || enc === 2;
+        if (isUtf16) {
+          while (pos + 1 < frameData.length && !(frameData[pos] === 0 && frameData[pos + 1] === 0)) {
+            pos += 2;
+          }
+          pos += 2;
+        } else {
+          while (pos < frameData.length && frameData[pos] !== 0) pos++;
+          pos += 1;
+        }
+
+        if (tsFormat === 2 && pos < frameData.length) {
+          const lrcLines: string[] = [];
+          while (pos < frameData.length) {
+            const textStart = pos;
+            if (isUtf16) {
+              while (
+                pos + 1 < frameData.length &&
+                !(frameData[pos] === 0 && frameData[pos + 1] === 0)
+              ) {
+                pos += 2;
+              }
+              const chunk = decodeTextBytes(frameData.subarray(textStart, pos), enc);
+              pos += 2;
+              if (pos + 4 > frameData.length) break;
+              const ms =
+                ((frameData[pos] << 24) |
+                  (frameData[pos + 1] << 16) |
+                  (frameData[pos + 2] << 8) |
+                  frameData[pos + 3]) >>>
+                0;
+              pos += 4;
+              const cleaned = chunk.replace(/[\r\n]+/g, ' ').trim();
+              if (cleaned) {
+                const sec = ms / 1000;
+                const mins = Math.floor(sec / 60);
+                const rem = sec % 60;
+                const whole = Math.floor(rem);
+                const centis = Math.floor((rem - whole) * 100);
+                lrcLines.push(
+                  `[${String(mins).padStart(2, '0')}:${String(whole).padStart(2, '0')}.${String(centis).padStart(2, '0')}] ${cleaned}`
+                );
+              }
+            } else {
+              while (pos < frameData.length && frameData[pos] !== 0) pos++;
+              const chunk = decodeTextBytes(frameData.subarray(textStart, pos), enc);
+              pos += 1;
+              if (pos + 4 > frameData.length) break;
+              const ms =
+                ((frameData[pos] << 24) |
+                  (frameData[pos + 1] << 16) |
+                  (frameData[pos + 2] << 8) |
+                  frameData[pos + 3]) >>>
+                0;
+              pos += 4;
+              const cleaned = chunk.replace(/[\r\n]+/g, ' ').trim();
+              if (cleaned) {
+                const sec = ms / 1000;
+                const mins = Math.floor(sec / 60);
+                const rem = sec % 60;
+                const whole = Math.floor(rem);
+                const centis = Math.floor((rem - whole) * 100);
+                lrcLines.push(
+                  `[${String(mins).padStart(2, '0')}:${String(whole).padStart(2, '0')}.${String(centis).padStart(2, '0')}] ${cleaned}`
+                );
+              }
+            }
+          }
+          if (lrcLines.length > 0) {
+            result.lyrics = lrcLines.join('\n');
+          }
+        }
       } else if (frameId === 'USLT' && frameData.length > 5 && !result.lyrics) {
         const enc = frameData[0];
         let pos = 4; // skip encoding (1) + lang (3)
@@ -446,7 +522,9 @@ function parseFlacMetadata(buffer: ArrayBuffer): Partial<ParsedAudioMetadata> {
             else if (key === 'TRACKNUMBER') {
               const n = parseInt(val, 10);
               if (!Number.isNaN(n)) result.trackNumber = n;
-            } else if (key === 'LYRICS' || key === 'UNSYNCEDLYRICS') {
+            } else if (key === 'SYNCEDLYRICS') {
+              result.lyrics = val;
+            } else if ((key === 'LYRICS' || key === 'UNSYNCEDLYRICS') && !result.lyrics) {
               result.lyrics = val;
             } else if (key === 'REPLAYGAIN_TRACK_GAIN') {
               const parsedGain = parseFloat(val.replace(/[^0-9+\-.]/g, ''));

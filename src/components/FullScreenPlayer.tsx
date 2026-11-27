@@ -16,7 +16,6 @@ import {
   SkipForward,
   Volume2,
   VolumeX,
-  X,
 } from 'lucide-react';
 import {
   AnimatePresence,
@@ -32,6 +31,7 @@ import { getPaletteForKey } from '../utils/artwork';
 import { formatDuration } from '../utils/formatters';
 import { triggerHaptic } from '../utils/haptics';
 import { AlbumArtwork } from './AlbumArtwork';
+import { SpotifyLyricsPanel } from './SpotifyLyricsPanel';
 
 export const FullScreenPlayer: React.FC = () => {
   const {
@@ -64,8 +64,6 @@ export const FullScreenPlayer: React.FC = () => {
   const [scrubValue, setScrubValue] = useState(0);
   const [showLyrics, setShowLyrics] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
-  const [isEditingLyrics, setIsEditingLyrics] = useState(false);
-  const [lyricsEditText, setLyricsEditText] = useState('');
   const [slideDirection, setSlideDirection] = useState<number>(1);
 
   const didDragRef = useRef(false);
@@ -282,87 +280,31 @@ export const FullScreenPlayer: React.FC = () => {
           >
             {/* Artwork / Lyrics Toggle View with Gesture Carousel */}
             <div className="flex-1 flex flex-col items-center justify-center py-2 sm:py-3 min-h-[320px]">
-              {showLyrics ? (
-                <div className="w-full h-full max-h-[380px] rounded-3xl bg-black/55 border border-white/12 backdrop-blur-xl p-5 sm:p-6 flex flex-col shadow-2xl">
-                  <div className="flex items-center justify-between pb-3 border-b border-white/10">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-bold text-white">Lyrics</span>
-                      <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-white/10 text-white/70">
-                        {currentSong.lyrics ? 'Embedded / Saved' : 'No Lyrics'}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          triggerHaptic('tap');
-                          if (!isEditingLyrics) {
-                            setLyricsEditText(currentSong.lyrics || '');
-                            setIsEditingLyrics(true);
-                          } else {
-                            void updateSongLyrics(currentSong.id, lyricsEditText.trim());
-                            setIsEditingLyrics(false);
-                          }
-                        }}
-                        className="min-h-[36px] px-3 rounded-xl bg-white/10 hover:bg-white/18 text-xs font-semibold text-white transition-colors"
-                      >
-                        {isEditingLyrics ? 'Save Lyrics' : 'Edit / Paste'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowLyrics(false);
-                          setIsEditingLyrics(false);
-                        }}
-                        aria-label="Show album artwork"
-                        className="min-w-[36px] min-h-[36px] flex items-center justify-center rounded-xl text-white/70 hover:text-white hover:bg-white/10 transition-colors"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex-1 overflow-y-auto pt-4 text-sm leading-relaxed text-white/90">
-                    {isEditingLyrics ? (
-                      <div className="h-full flex flex-col gap-2">
-                        <textarea
-                          rows={8}
-                          value={lyricsEditText}
-                          onChange={(e) => setLyricsEditText(e.target.value)}
-                          placeholder="Paste or type static or [00:12.34] time-synced lyrics here..."
-                          className="w-full flex-1 p-3.5 rounded-xl bg-white/10 text-white text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)] resize-none"
-                        />
-                        <p className="text-[11px] text-white/40">
-                          Tip: EchoPlay saves your lyrics locally on your device.
-                        </p>
-                      </div>
-                    ) : currentSong.lyrics ? (
-                      <div className="whitespace-pre-wrap font-medium space-y-2">
-                        {currentSong.lyrics}
-                      </div>
-                    ) : (
-                      <div className="h-full flex flex-col items-center justify-center text-center py-8 text-white/55">
-                        <FileText className="w-8 h-8 mb-3 opacity-60" />
-                        <p className="font-medium text-white/80">No embedded or saved lyrics found</p>
-                        <p className="text-xs mt-1.5 max-w-xs">
-                          Click &quot;Edit / Paste&quot; above to add your own static or time-synced lyrics for this track.
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setLyricsEditText('');
-                            setIsEditingLyrics(true);
-                          }}
-                          className="mt-4 min-h-[40px] px-4 rounded-xl bg-[var(--accent)] text-white text-xs font-semibold"
-                        >
-                          Add Lyrics Now
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div className="relative w-full max-w-[310px] sm:max-w-[360px] aspect-square flex items-center justify-center">
+              <AnimatePresence mode="wait" initial={false}>
+                {showLyrics ? (
+                  <SpotifyLyricsPanel
+                    key={`lyrics-${currentSong.id}`}
+                    songId={currentSong.id}
+                    lyrics={currentSong.lyrics}
+                    currentTime={displayedTime}
+                    duration={effectiveDuration}
+                    isPlaying={isPlaying}
+                    palette={palette}
+                    onSeek={(sec) => seekTo(sec)}
+                    onSaveLyrics={async (text) => {
+                      await updateSongLyrics(currentSong.id, text);
+                    }}
+                    onClose={() => setShowLyrics(false)}
+                  />
+                ) : (
+                  <motion.div
+                    key="artwork-stage"
+                    initial={{ opacity: 0, scale: 0.96 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.96 }}
+                    transition={{ duration: 0.2 }}
+                    className="relative w-full max-w-[310px] sm:max-w-[360px] aspect-square flex items-center justify-center"
+                  >
                   {/* Next Track HUD Pill (revealed when swiping left) */}
                   <motion.div
                     style={{ opacity: nextIndicatorOpacity, scale: nextIndicatorScale }}
@@ -417,8 +359,9 @@ export const FullScreenPlayer: React.FC = () => {
                       />
                     </motion.div>
                   </AnimatePresence>
-                </div>
-              )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               {/* Subtle gesture hint */}
               {!showLyrics && (
