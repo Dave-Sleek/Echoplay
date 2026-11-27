@@ -124,7 +124,9 @@ class AudioPlayerService {
   // Active crossfade cleanup tracking
   private crossfadeTimerId: number | null = null;
   private crossfadeRafId: number | null = null;
+  private crossfadeIntervalId: number | null = null;
   private fadingOutDeckIndex: 0 | 1 | null = null;
+  private deckUnlocked: [boolean, boolean] = [false, false];
 
   // Web Audio buffer fallback state
   private wbBuffer: AudioBuffer | null = null;
@@ -328,6 +330,48 @@ class AudioPlayerService {
     });
   }
 
+  private recreateDeckElement(idx: 0 | 1): HTMLAudioElement {
+    const oldEl = this.decks[idx];
+    const id = idx === 0 ? 'echoplay-audio-engine' : 'echoplay-audio-engine-b';
+    try {
+      oldEl.pause();
+      oldEl.removeAttribute('src');
+      oldEl.load();
+      oldEl.remove();
+    } catch {
+      // Ignore cleanup errors
+    }
+    const oldUrl = this.deckObjectUrls[idx];
+    this.deckObjectUrls[idx] = null;
+    this.retireObjectUrl(oldUrl);
+
+    const freshEl = document.createElement('audio');
+    freshEl.id = id;
+    freshEl.preload = 'auto';
+    freshEl.setAttribute('playsinline', '');
+    freshEl.setAttribute('webkit-playsinline', '');
+    freshEl.style.display = 'none';
+
+    this.decks[idx] = freshEl;
+    this.deckMediaSources[idx] = null;
+    this.deckUnlocked[idx] = false;
+    this.attachDeckListeners(freshEl, idx);
+
+    if (typeof window !== 'undefined') {
+      const win = window as unknown as {
+        __echoPlayAudioEngine?: HTMLAudioElement;
+        __echoPlayAudioEngineB?: HTMLAudioElement;
+      };
+      if (idx === 0) win.__echoPlayAudioEngine = freshEl;
+      else win.__echoPlayAudioEngineB = freshEl;
+    }
+
+    if (typeof document !== 'undefined' && document.body) {
+      document.body.appendChild(freshEl);
+    }
+    return freshEl;
+  }
+
   private ensureAudioElementMounted(): void {
     if (typeof document === 'undefined') return;
     const mount = () => {
@@ -433,20 +477,66 @@ class AudioPlayerService {
     return this.audio.error ? formatMediaError(this.audio.error) : null;
   }
 
+  clearPendingResumeTime(): void {
+    this.pendingResumeTime = null;
+  }
+
+  private shouldUseAudioContext(): boolean {
+    return this.normalizationEnabled || this.hasActiveEq();
+  }
+
   primeAudioOnGesture(willReplaceSource = false): void {
     this.ensureAudioElementMounted();
-    if (this.normalizationEnabled || this.crossfadeEnabled || this.hasActiveEq()) {
+    if (this.shouldUseAudioContext()) {
       this.ensureAudioContextGraph(this.mode === 'html');
     }
     if (this.audioCtx && this.audioCtx.state !== 'running') {
       this.audioCtx.resume().catch(() => {});
     }
 
-    if (this.isAudioUnlocked || this.primingPromise) {
+    if (!isAppleTouchDevice()) {
       return;
     }
 
-    if (!isAppleTouchDevice()) {
+    const activeIdx = this.activeDeckIndex;
+    const standbyIdx = this.standbyDeckIndex;
+
+    // Prime standby deck silently if crossfade is enabled and it hasn't been unlocked yet
+    if (
+      this.crossfadeEnabled &&
+      !this.deckUnlocked[standbyIdx] &&
+      !this.decks[standbyIdx].getAttribute('src')
+    ) {
+      const standbyEl = this.decks[standbyIdx];
+      try {
+        standbyEl.muted = true;
+        standbyEl.src = SILENT_WAV_DATA_URI;
+        const sp = standbyEl.play();
+        if (sp && typeof sp.then === 'function') {
+          sp.then(() => {
+            this.deckUnlocked[standbyIdx] = true;
+            if (this.fadingOutDeckIndex !== standbyIdx && this.activeDeckIndex !== standbyIdx) {
+              standbyEl.pause();
+              standbyEl.removeAttribute('src');
+              standbyEl.load();
+              standbyEl.muted = false;
+            }
+          }).catch(() => {
+            standbyEl.muted = false;
+          });
+        } else {
+          this.deckUnlocked[standbyIdx] = true;
+          standbyEl.pause();
+          standbyEl.removeAttribute('src');
+          standbyEl.load();
+          standbyEl.muted = false;
+        }
+      } catch {
+        standbyEl.muted = false;
+      }
+    }
+
+    if (this.isAudioUnlocked || this.primingPromise) {
       return;
     }
 
@@ -461,6 +551,7 @@ class AudioPlayerService {
           this.primingPromise = p
             .then(() => {
               this.isAudioUnlocked = true;
+              this.deckUnlocked[activeIdx] = true;
               if (this.primingToken === token && this.isPriming) {
                 this.audio.pause();
                 this.audio.muted = false;
@@ -480,6 +571,7 @@ class AudioPlayerService {
             });
         } else {
           this.isAudioUnlocked = true;
+          this.deckUnlocked[activeIdx] = true;
           this.audio.muted = false;
           this.isPriming = false;
         }
@@ -588,9 +680,6 @@ class AudioPlayerService {
 
   setCrossfadeEnabled(enabled: boolean): void {
     this.crossfadeEnabled = enabled;
-    if (enabled && (this.isAudioUnlocked || !this.paused)) {
-      this.ensureAudioContextGraph(this.mode === 'html', true);
-    }
   }
 
   setEqBands(bands: [number, number, number, number, number]): void {
@@ -657,6 +746,10 @@ class AudioPlayerService {
     if (this.crossfadeRafId !== null) {
       window.cancelAnimationFrame(this.crossfadeRafId);
       this.crossfadeRafId = null;
+    }
+    if (this.crossfadeIntervalId !== null) {
+      window.clearInterval(this.crossfadeIntervalId);
+      this.crossfadeIntervalId = null;
     }
 
     if (this.fadingOutDeckIndex !== null) {
@@ -896,6 +989,9 @@ class AudioPlayerService {
     const token = ++this.loadToken;
     this.cancelActiveCrossfade(true);
     this.isSilentPreload = !autoPlay;
+    if (!this.shouldUseAudioContext() && this.deckMediaSources[this.activeDeckIndex]) {
+      this.recreateDeckElement(this.activeDeckIndex);
+    }
     this.ensureAudioElementMounted();
 
     if (autoPlay && this.primingPromise) {
@@ -983,7 +1079,9 @@ class AudioPlayerService {
   }
 
   async crossfadeToSong(song: Song, fadeSeconds: number, startTime = 0): Promise<boolean> {
-    if (this.mode !== 'html' || !this.hasActiveSource() || this.paused) {
+    const isBackgrounded =
+      typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    if (this.mode !== 'html' || !this.hasActiveSource() || this.paused || isBackgrounded) {
       return this.loadSong(song, true, startTime);
     }
 
@@ -1003,11 +1101,17 @@ class AudioPlayerService {
     const outgoingIdx = this.activeDeckIndex;
     const incomingIdx = this.standbyDeckIndex;
     const outgoingEl = this.decks[outgoingIdx];
-    const incomingEl = this.decks[incomingIdx];
+    let incomingEl = this.decks[incomingIdx];
 
-    // Attach Web Audio graph to both decks if possible (essential for iOS volume crossfade)
-    const graphReady = this.ensureAudioContextGraph(true, true);
-    if (this.audioCtx && this.audioCtx.state !== 'running') {
+    if (!this.shouldUseAudioContext() && this.deckMediaSources[incomingIdx]) {
+      incomingEl = this.recreateDeckElement(incomingIdx);
+    }
+
+    // Only attach Web Audio gain fade if AudioContext DSP is already active;
+    // otherwise use native HTML5 .volume so background playback stays 100% OS-native.
+    const needsCtx = this.shouldUseAudioContext() || Boolean(this.deckMediaSources[outgoingIdx]);
+    const graphReady = needsCtx ? this.ensureAudioContextGraph(true, true) : false;
+    if (graphReady && this.audioCtx && this.audioCtx.state !== 'running') {
       try {
         await this.audioCtx.resume();
       } catch {
@@ -1053,11 +1157,12 @@ class AudioPlayerService {
     incomingEl.defaultPlaybackRate = this.targetPlaybackRate;
     incomingEl.playbackRate = this.targetPlaybackRate;
 
-    // Wait briefly for incoming deck metadata/audio buffers
     try {
       await this.waitForCanPlay(token, 2500, incomingEl);
     } catch {
       if (token === this.loadToken) {
+        incomingEl.removeAttribute('src');
+        incomingEl.load();
         return this.loadSong(song, true, startTime);
       }
       return false;
@@ -1072,7 +1177,36 @@ class AudioPlayerService {
       }
     }
 
-    // Swap active deck pointer BEFORE play() so UI listeners attach to the new track immediately
+    // Attempt play BEFORE committing deck swap so failed background/autoplay falls back to active deck
+    try {
+      await incomingEl.play();
+      this.isAudioUnlocked = true;
+      this.deckUnlocked[incomingIdx] = true;
+    } catch {
+      try {
+        incomingEl.pause();
+        incomingEl.removeAttribute('src');
+        incomingEl.load();
+      } catch {
+        // Ignore cleanup errors
+      }
+      const failedUrl = this.deckObjectUrls[incomingIdx];
+      this.deckObjectUrls[incomingIdx] = null;
+      this.retireObjectUrl(failedUrl);
+      this.flushRetiredObjectUrls();
+      return this.loadSong(song, true, startTime);
+    }
+
+    if (token !== this.loadToken) {
+      try {
+        incomingEl.pause();
+      } catch {
+        // Ignore
+      }
+      return false;
+    }
+
+    // Commit deck swap after incoming playback is active
     this.activeDeckIndex = incomingIdx;
     this.fadingOutDeckIndex = outgoingIdx;
     this.activePlayableBlob = playableBlob;
@@ -1087,19 +1221,10 @@ class AudioPlayerService {
     this.pendingResumeTime = safeStart > 0.25 ? safeStart : null;
     this.untypedFallbackTriedForToken = -1;
     this.applyGainDb(song.replayGainDb ?? 0);
-    void this.updateMediaSessionMetadata(song);
-
-    try {
-      await incomingEl.play();
-      this.isAudioUnlocked = true;
-      if ('mediaSession' in navigator) {
-        navigator.mediaSession.playbackState = 'playing';
-      }
-    } catch {
-      // If crossfade simultaneous play fails (e.g. strict single-stream policy), fallback cleanly
-      this.cancelActiveCrossfade(true);
-      return this.loadSong(song, true, startTime);
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'playing';
     }
+    void this.updateMediaSessionMetadata(song);
 
     if (safeStart > 0.25 && Math.abs((incomingEl.currentTime || 0) - safeStart) > 1.2) {
       try {
@@ -1111,7 +1236,7 @@ class AudioPlayerService {
       }
     }
 
-    // Run smooth equal-power/linear crossfade ramp on both decks simultaneously
+    // Run smooth crossfade ramp on both decks simultaneously
     if (useWebAudioFade && this.audioCtx && outgoingGain && incomingGain) {
       const now = this.audioCtx.currentTime;
       const currentOutGain = Math.max(0.0001, outgoingGain.gain.value || 1);
@@ -1124,7 +1249,6 @@ class AudioPlayerService {
       incomingGain.gain.linearRampToValueAtTime(1.0, now + safeFadeSec);
     }
 
-    // Smooth HTML5 volume ramp (handles browsers without WebAudio graph attachment)
     const startMs = performance.now();
     const fadeMs = safeFadeSec * 1000;
     const startOutVol = (() => {
@@ -1135,10 +1259,9 @@ class AudioPlayerService {
       }
     })();
 
-    const stepFade = (nowMs: number) => {
-      if (this.fadingOutDeckIndex !== outgoingIdx) return;
-      const t = Math.min(1, (nowMs - startMs) / fadeMs);
-
+    const applyHtmlFade = () => {
+      if (this.fadingOutDeckIndex !== outgoingIdx) return true;
+      const t = Math.min(1, (performance.now() - startMs) / fadeMs);
       if (!useWebAudioFade) {
         try {
           outgoingEl.volume = Math.max(0, startOutVol * (1 - t));
@@ -1147,14 +1270,26 @@ class AudioPlayerService {
           // Ignore iOS read-only volume
         }
       }
+      return t >= 1;
+    };
 
-      if (t < 1) {
+    const stepFade = () => {
+      const done = applyHtmlFade();
+      if (!done && this.fadingOutDeckIndex === outgoingIdx) {
         this.crossfadeRafId = window.requestAnimationFrame(stepFade);
       } else {
         this.crossfadeRafId = null;
       }
     };
     this.crossfadeRafId = window.requestAnimationFrame(stepFade);
+    this.crossfadeIntervalId = window.setInterval(() => {
+      if (applyHtmlFade()) {
+        if (this.crossfadeIntervalId !== null) {
+          window.clearInterval(this.crossfadeIntervalId);
+          this.crossfadeIntervalId = null;
+        }
+      }
+    }, 50);
 
     this.crossfadeTimerId = window.setTimeout(() => {
       this.crossfadeTimerId = null;
@@ -1300,8 +1435,8 @@ class AudioPlayerService {
       return;
     }
 
-    if (this.normalizationEnabled || this.crossfadeEnabled || this.hasActiveEq()) {
-      this.ensureAudioContextGraph(true, this.crossfadeEnabled);
+    if (this.shouldUseAudioContext()) {
+      this.ensureAudioContextGraph(true, false);
     }
 
     if (this.audioCtx && this.audioCtx.state !== 'running') {

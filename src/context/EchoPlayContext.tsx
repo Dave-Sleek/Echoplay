@@ -339,6 +339,7 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const persistSongPosition = useCallback(
     (songId: string, positionSec: number, durationSec: number) => {
+      if (!(stateRef.current.settings.autoResumeEnabled ?? true)) return;
       const target = stateRef.current.songMap.get(songId);
       if (!target) return;
       const effectiveDur = durationSec > 0 ? durationSec : target.duration || 0;
@@ -358,7 +359,8 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const flushPlaybackSnapshot = useCallback((timeOverride?: number) => {
     const st = stateRef.current;
-    const activeTime = timeOverride ?? st.currentTime;
+    const autoResume = st.settings.autoResumeEnabled ?? true;
+    const activeTime = autoResume ? (timeOverride ?? st.currentTime) : 0;
     void savePlaybackSnapshot({
       currentSongId: st.currentSong?.id ?? null,
       queueIds: st.queueIds,
@@ -477,7 +479,10 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             setCurrentIndex(idx);
             const restoredSong = loadedMap.get(validQueue[idx]);
             if (restoredSong) {
-              const resumePos = snapshot.currentTime || restoredSong.lastPosition || 0;
+              const autoResume = loadedSettings.autoResumeEnabled ?? true;
+              const resumePos = autoResume
+                ? snapshot.currentTime || restoredSong.lastPosition || 0
+                : 0;
               setCurrentTime(resumePos);
               setDuration(restoredSong.duration || 0);
               // Preload silently without auto-playing (iOS requires user gesture for play)
@@ -507,6 +512,8 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const lastSnapshotTimeRef = useRef(0);
   useEffect(() => {
     if (!isHydrated) return;
+    const autoResume = settings.autoResumeEnabled ?? true;
+    if (!autoResume && isPlaying) return;
     const now = Date.now();
     if (now - lastSnapshotTimeRef.current < 1000 && isPlaying) return;
     lastSnapshotTimeRef.current = now;
@@ -521,17 +528,20 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     shuffle,
     repeatMode,
     isPlaying,
+    settings.autoResumeEnabled,
     flushPlaybackSnapshot,
   ]);
 
   useEffect(() => {
     const handleFlush = () => {
       if (!isHydrated) return;
-      const curTime = playerService.currentTime || stateRef.current.currentTime;
-      const curSong = stateRef.current.currentSong;
-      const curDur = playerService.duration || stateRef.current.duration;
-      flushPlaybackSnapshot(curTime);
-      if (curSong && curTime > 0) {
+      const st = stateRef.current;
+      const autoResume = st.settings.autoResumeEnabled ?? true;
+      const curTime = playerService.currentTime || st.currentTime;
+      const curSong = st.currentSong;
+      const curDur = playerService.duration || st.duration;
+      flushPlaybackSnapshot(autoResume ? curTime : 0);
+      if (autoResume && curSong && curTime > 0) {
         persistSongPosition(curSong.id, curTime, curDur);
       }
     };
@@ -729,7 +739,8 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           st.sleepTimer !== 'track' &&
           st.currentSong &&
           !playerService.paused &&
-          dur > cfg.crossfadeDuration + 1.5
+          dur > cfg.crossfadeDuration + 1.5 &&
+          (typeof document === 'undefined' || document.visibilityState !== 'hidden')
         ) {
           const remaining = dur - curTime;
           const fadeWindow = Math.min(cfg.crossfadeDuration, dur * 0.4);
@@ -1007,6 +1018,13 @@ export const EchoPlayProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   const updateSettings = useCallback(async (partial: Partial<UserSettings>) => {
+    if (partial.autoResumeEnabled === false) {
+      playerService.clearPendingResumeTime();
+      if (playerService.paused && playerService.isSilentPreload) {
+        playerService.seekTo(0);
+        setCurrentTime(0);
+      }
+    }
     setSettings((prev) => {
       const next = { ...prev, ...partial };
       void saveUserSettings(next);

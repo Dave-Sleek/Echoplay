@@ -276,7 +276,7 @@ export const SettingsView: React.FC = () => {
               Auto-Resume Exact Timestamp
             </p>
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Automatically resume tracks from the exact second you last paused or closed the app
+              Remember and resume each track&apos;s exact timestamp when reopened or replayed (background playback stays active either way)
             </p>
           </div>
           <button
